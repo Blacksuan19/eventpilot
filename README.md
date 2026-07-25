@@ -94,6 +94,11 @@ docker compose up --build
 Docker only starts and recovers the process. The agent's `wait` tool controls polling; Docker does
 not wake or schedule the graph.
 
+For time-compressed Docker integration runs, set `EVENTPILOT_TIME_ACCELERATION` to a multiplier
+greater than `1`. The mock API and graph then share an accelerated hidden clock, while each wait
+only yields briefly in real time. The agent still chooses every polling interval without seeing the
+fixture durations or acceleration factor.
+
 ## Quality gate
 
 ```bash

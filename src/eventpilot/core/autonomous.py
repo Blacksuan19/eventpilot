@@ -79,7 +79,7 @@ def build_autonomous_graph(
         phase = state.get("phase", "discovery")
         allowed = {
             "discovery": {"list_experiments", "wait", "finish_cycle"},
-            "objective": {"select_objective"},
+            "objective": {"select_objective", "finish_cycle"},
             "active": {
                 "get_experiment",
                 "list_experiment_updates",

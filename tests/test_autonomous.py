@@ -22,6 +22,7 @@ from eventpilot.core.agent_reasoning import (
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
 from eventpilot.core.notifications import DeliveryResult, Notification
 from eventpilot.simulator import (
+    AcceleratedClock,
     ExperimentScenario,
     LifecycleStep,
     MockFoundryClient,
@@ -79,6 +80,16 @@ class ManualClock:
         """Record an agent-selected delay and advance time without blocking tests."""
         self.waits.append(delay)
         self.now += delay
+
+
+async def test_accelerated_clock_advances_logical_time_without_real_delay() -> None:
+    """Prove Docker acceleration advances the shared hidden clock by its multiplier."""
+    clock = AcceleratedClock(3_600)
+    started_at = clock()
+
+    await clock.sleep(2)
+
+    assert clock() - started_at == 7_200
 
 
 def scenario_with_lifecycle(
@@ -153,6 +164,37 @@ async def test_agent_discovers_polls_results_and_finishes_cycle() -> None:
     assert len(sink.notifications) == 1
     assert "results are ready" in sink.notifications[0].title
     assert clock.waits == [1, 1]
+
+
+async def test_budget_yield_can_finish_after_discovery() -> None:
+    """Allow a bounded cycle to yield after discovery before choosing an objective."""
+    foundry, clock = timed_foundry([scenario_with_lifecycle([ExperimentStatus.IN_QUEUE])])
+    agent = ScriptedAgent(
+        [
+            AgentTurn(
+                rationale="Discover current experiments.",
+                action=ListExperiments(),
+            ),
+            AgentTurn(
+                rationale="Yield after reaching this cycle's budget.",
+                action=FinishCycle(summary="Resume from discovery in a fresh cycle."),
+            ),
+        ]
+    )
+    graph = build_autonomous_graph(
+        agent,
+        foundry,
+        RecordingSink(),
+        sleep=clock.sleep,
+        clock=clock,
+        max_tool_calls_per_cycle=1,
+    )
+
+    result = await AgentRuntime(graph).run(max_cycles=1)
+
+    assert result.get("outcome") == "cycle_finished"
+    assert result.get("cycle_summary") == "Resume from discovery in a fresh cycle."
+    assert tool_names(result.get("transcript", [])) == ["list_experiments"]
 
 
 async def test_agent_investigates_updates_while_completed_results_are_delayed() -> None:
