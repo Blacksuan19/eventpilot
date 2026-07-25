@@ -3,7 +3,7 @@
 import asyncio
 import json
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,12 @@ class DashboardEventStore:
         """Return a copy of retained events in chronological order."""
         return list(self._events)
 
+    def clear(self) -> None:
+        """Remove retained and durable events for a fresh demonstration run."""
+        self._events.clear()
+        if self._path:
+            self._path.unlink(missing_ok=True)
+
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
         """Register and return a queue for one live browser connection."""
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -52,7 +58,12 @@ class DashboardEventStore:
         self._subscribers.discard(queue)
 
 
-def create_dashboard_app(store: DashboardEventStore) -> FastAPI:
+ResetAgent = Callable[[], Awaitable[None]]
+
+
+def create_dashboard_app(
+    store: DashboardEventStore, *, reset_agent: ResetAgent | None = None
+) -> FastAPI:
     """Create the HTTP and server-sent-event interface for one event store."""
     app = FastAPI(title="EventPilot Live", docs_url=None, redoc_url=None)
 
@@ -70,6 +81,14 @@ def create_dashboard_app(store: DashboardEventStore) -> FastAPI:
     async def health() -> dict[str, str]:
         """Report dashboard readiness for Docker and browser checks."""
         return {"status": "ok"}
+
+    @app.post("/api/reset")
+    async def reset() -> dict[str, str]:
+        """Reset the durable agent runtime and dashboard history when configured."""
+        if reset_agent is None:
+            return {"status": "unavailable"}
+        await reset_agent()
+        return {"status": "reset"}
 
     @app.get("/api/stream")
     async def stream() -> StreamingResponse:

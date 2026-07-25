@@ -6,56 +6,68 @@
   <title>EventPilot Live</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
   <style>
-    :root { color-scheme: dark; --bg:#090d12; --panel:#111821; --line:#24303d; --muted:#8fa0b3; --text:#edf5fc; --cyan:#5eead4; --blue:#60a5fa; --amber:#fbbf24; --red:#fb7185; --green:#4ade80; }
+    :root { color-scheme: light; --bg:#eef3f8; --panel:#ffffff; --line:#d8e1ea; --muted:#64748b; --text:#172033; --cyan:#0f9f91; --blue:#2563eb; --amber:#b76b00; --red:#dc4261; --green:#168247; }
     * { box-sizing:border-box; }
-    body { margin:0; background:radial-gradient(circle at 15% -10%,#15324a 0,transparent 32%),var(--bg); color:var(--text); font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,sans-serif; }
+    body { margin:0; min-height:100vh; background:linear-gradient(145deg,#f8fbfe 0,#e8eff6 100%); color:var(--text); font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,sans-serif; }
     button { font:inherit; }
-    .shell { max-width:1500px; margin:auto; padding:28px; }
-    header { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
+    .shell { max-width:1420px; margin:auto; padding:22px 26px 28px; }
+    header { display:flex; justify-content:space-between; align-items:center; margin-bottom:18px; }
     .brand { display:flex; align-items:center; gap:14px; }
-    .mark { width:42px; height:42px; display:grid; place-items:center; border-radius:12px; background:linear-gradient(135deg,var(--cyan),var(--blue)); color:#061019; font-weight:900; font-size:20px; box-shadow:0 0 34px #5eead433; }
+    .mark { width:42px; height:42px; display:grid; place-items:center; border-radius:12px; background:linear-gradient(135deg,#55d8cc,#5c8ff5); color:#08263c; font-weight:900; font-size:20px; box-shadow:0 8px 24px #2563eb22; }
     h1 { font-size:23px; margin:0; letter-spacing:-.03em; } .subtitle { color:var(--muted); font-size:12px; }
-    .live { display:flex; gap:8px; align-items:center; padding:7px 12px; border:1px solid #2e4e46; background:#10211e; border-radius:999px; color:var(--cyan); font-weight:700; font-size:12px; }
-    .dot { width:8px; height:8px; border-radius:50%; background:var(--green); box-shadow:0 0 12px var(--green); }
+    .live { display:flex; gap:8px; align-items:center; padding:7px 12px; border:1px solid #b8dfcc; background:#eefbf4; border-radius:999px; color:var(--green); font-weight:700; font-size:12px; }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--green); box-shadow:0 0 0 4px #16824718; }
+    .header-actions { display:flex; align-items:center; gap:10px; }
+    .reset { padding:7px 12px; border:1px solid #d6dee7; background:#fff; color:#52657b; border-radius:9px; cursor:pointer; font-weight:700; font-size:11px; box-shadow:0 4px 14px #3341550d; }
+    .reset:hover { border-color:#e0a2ad; color:#b4233e; background:#fff8f9; }
+    .reset:disabled { cursor:wait; opacity:.55; }
     .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px; }
-    .card { background:linear-gradient(180deg,#141c25ee,#0f151dee); border:1px solid var(--line); border-radius:14px; box-shadow:0 18px 55px #0004; }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; box-shadow:0 10px 32px #33415512; }
     .stat { padding:16px 18px; } .label { text-transform:uppercase; letter-spacing:.11em; font-size:10px; color:var(--muted); font-weight:800; }
     .value { margin-top:5px; font-size:22px; font-weight:760; letter-spacing:-.03em; } .value.small { font-size:16px; }
-    .layout { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(320px,.85fr); gap:16px; }
+    .layout { display:grid; grid-template-columns:minmax(0,1.7fr) minmax(350px,.8fr); gap:16px; align-items:start; }
     .stack { display:grid; gap:16px; align-content:start; }
     .section-head { display:flex; justify-content:space-between; align-items:center; padding:16px 18px 12px; border-bottom:1px solid var(--line); }
     h2 { font-size:14px; margin:0; } .body { padding:18px; }
     .activity { min-height:210px; position:relative; overflow:hidden; }
-    .activity:after { content:""; position:absolute; inset:auto -50px -90px auto; width:220px; height:220px; border-radius:50%; background:#60a5fa12; filter:blur(3px); }
+    .activity:after { content:""; position:absolute; inset:auto -50px -90px auto; width:220px; height:220px; border-radius:50%; background:#60a5fa0d; filter:blur(3px); }
     .tool-row { display:flex; gap:10px; align-items:center; margin-bottom:13px; }
-    .pill { border-radius:7px; padding:4px 8px; font:700 11px ui-monospace,SFMono-Regular,monospace; background:#14293b; color:#8ac8ff; border:1px solid #244665; }
+    .pill { border-radius:7px; padding:4px 8px; font:700 11px ui-monospace,SFMono-Regular,monospace; background:#eef5ff; color:#2459aa; border:1px solid #c8dcf7; }
     .model { color:var(--muted); font:12px ui-monospace,SFMono-Regular,monospace; }
     .rationale { font-size:20px; line-height:1.35; max-width:850px; letter-spacing:-.02em; margin-bottom:16px; }
-    pre { white-space:pre-wrap; word-break:break-word; margin:0; color:#b7c7d8; font:12px/1.55 ui-monospace,SFMono-Regular,monospace; }
+    pre { white-space:pre-wrap; word-break:break-word; margin:0; color:#42546b; font:12px/1.55 ui-monospace,SFMono-Regular,monospace; }
     .waitbox { display:none; margin-top:18px; } .waitmeta { display:flex; justify-content:space-between; color:var(--muted); font-size:12px; margin-bottom:7px; }
-    .track { height:7px; background:#202b36; border-radius:9px; overflow:hidden; } .bar { height:100%; width:0; background:linear-gradient(90deg,var(--cyan),var(--blue)); transition:width .4s linear; }
+    .track { height:7px; background:#dce6ef; border-radius:9px; overflow:hidden; } .bar { height:100%; width:0; background:linear-gradient(90deg,var(--cyan),var(--blue)); transition:width .4s linear; }
     .filters { display:flex; gap:5px; } .filter { color:var(--muted); background:transparent; border:1px solid transparent; border-radius:7px; padding:4px 8px; cursor:pointer; font-size:11px; }
-    .filter.active { color:var(--text); background:#1b2733; border-color:#2a3948; }
-    .timeline { max-height:630px; overflow:auto; padding:4px 18px 18px; }
-    .event { display:grid; grid-template-columns:22px 1fr; gap:11px; padding:14px 0; border-bottom:1px solid #1d2731; }
-    .icon { width:22px; height:22px; border-radius:50%; display:grid; place-items:center; background:#1d2b38; color:var(--blue); font-size:10px; font-weight:900; }
-    .event.alert .icon { background:#2b2411; color:var(--amber); } .event.wait .icon { color:var(--cyan); }
+    .filter.active { color:var(--text); background:#edf3f8; border-color:#d5e0ea; }
+    .timeline { max-height:540px; overflow:auto; padding:4px 18px 18px; scrollbar-gutter:stable; }
+    .event { display:grid; grid-template-columns:22px minmax(0,1fr); gap:11px; padding:13px 0; border-bottom:1px solid #e5ebf1; }
+    .icon { width:22px; height:22px; border-radius:50%; display:grid; place-items:center; background:#e9f1fb; color:var(--blue); font-size:10px; font-weight:900; }
+    .event.alert .icon { background:#fff3d8; color:var(--amber); } .event.wait .icon { color:var(--cyan); }
     .event-title { display:flex; justify-content:space-between; gap:12px; font-weight:700; font-size:13px; }
     time { color:var(--muted); font-size:10px; font-weight:500; white-space:nowrap; }
-    .event-copy { color:#b0bfce; margin-top:3px; font-size:12px; }
-    details { margin-top:8px; } summary { cursor:pointer; color:#71869a; font-size:11px; user-select:none; } details pre { margin-top:7px; padding:10px; background:#0a1016; border-radius:8px; max-height:240px; overflow:auto; }
-    .experiments { display:grid; gap:8px; } .experiment { padding:11px 12px; border:1px solid #202c37; background:#0d141b; border-radius:9px; }
-    .exp-top { display:flex; justify-content:space-between; gap:8px; } .exp-id { font-weight:700; font-size:12px; } .status { font-size:10px; padding:2px 7px; border-radius:9px; background:#182b38; color:#8ed4ff; white-space:nowrap; }
-    .status.done { color:var(--green); background:#11291b; } .exp-meta { color:var(--muted); font-size:10px; margin-top:4px; }
-    .alerts { display:grid; gap:9px; } .alert-item { border-left:3px solid var(--amber); background:#18170f; padding:11px 12px; border-radius:4px 9px 9px 4px; }
-    .alert-title { font-weight:750; font-size:12px; } .alert-body { color:#bdbba9; font-size:11px; margin-top:3px; }
+    .event-copy { color:#52657b; margin-top:3px; font-size:12px; overflow-wrap:anywhere; }
+    details { margin-top:8px; } summary { cursor:pointer; color:#647c96; font-size:11px; user-select:none; } details pre { margin-top:7px; padding:10px; background:#f3f6f9; border:1px solid #e1e8ef; border-radius:8px; max-height:240px; overflow:auto; }
+    .experiments { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; } .experiment { min-width:0; padding:10px 12px; border:1px solid #dce5ed; background:#f8fafc; border-radius:9px; }
+    .exp-top { display:flex; justify-content:space-between; gap:8px; } .exp-id { font-weight:700; font-size:12px; } .status { font-size:10px; padding:2px 7px; border-radius:9px; background:#eaf4fb; color:#17658f; white-space:nowrap; }
+    .status.done { color:var(--green); background:#e9f8ef; } .exp-meta { color:var(--muted); font-size:10px; margin-top:4px; }
+    .alerts { display:grid; gap:10px; max-height:460px; overflow:auto; scrollbar-gutter:stable; align-content:start; }
+    .alert-item { min-width:0; border-left:4px solid #e29a26; border:1px solid #eadfca; border-left-width:4px; background:#fffbf2; padding:12px 13px; border-radius:5px 10px 10px 5px; }
+    .alert-top { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+    .alert-title { min-width:0; font-weight:780; font-size:12px; overflow-wrap:anywhere; }
+    .alert-time { color:var(--muted); font-size:10px; white-space:nowrap; }
+    .alert-resources { display:flex; flex-wrap:wrap; gap:5px; margin-top:7px; }
+    .resource { padding:2px 7px; border-radius:999px; background:#fff0c9; color:#86520a; font:700 9px ui-monospace,SFMono-Regular,monospace; }
+    .alert-body { display:grid; gap:5px; color:#594f40; font-size:11px; line-height:1.45; margin-top:8px; overflow-wrap:anywhere; word-break:break-word; }
+    .alert-line { padding-top:5px; border-top:1px solid #efe5d3; }
     .empty { color:#6f8295; padding:24px 0; text-align:center; font-size:12px; }
-    @media (max-width:900px) { .layout{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}.shell{padding:16px} }
+    @media (max-width:900px) { .layout{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}.shell{padding:16px}.alerts{max-height:420px} }
+    @media (max-width:520px) { .experiments{grid-template-columns:1fr} }
   </style>
 </head>
 <body>
 <main class="shell">
-  <header><div class="brand"><div class="mark">E</div><div><h1>EventPilot</h1><div class="subtitle">Autonomous operations · live agent workspace</div></div></div><div class="live"><span class="dot"></span><span id="connection">Connecting</span></div></header>
+  <header><div class="brand"><div class="mark">E</div><div><h1>EventPilot</h1><div class="subtitle">Autonomous operations · live agent workspace</div></div></div><div class="header-actions"><button class="reset" id="reset" type="button">Reset demo</button><div class="live"><span class="dot"></span><span id="connection">Connecting</span></div></div></header>
   <section class="stats">
     <div class="card stat"><div class="label">Cycle</div><div class="value" id="cycle">0</div></div>
     <div class="card stat"><div class="label">Tool calls</div><div class="value" id="tools">0</div></div>
@@ -81,11 +93,14 @@
   function renderStats(){const e=latest(),s=sourceState(); $('cycle').textContent=e.cycle_count??0;$('tools').textContent=e.tool_count??0;$('phase').textContent=s.phase||'Starting';$('completed').textContent=(s.completed_experiment_ids||[]).length;$('source').textContent=e.data_source||'waiting for source';}
   function renderActivity(){const d=[...state.events].reverse().find(e=>e.event==='agent_decision');if(!d)return;$('active-tool').textContent=d.tool;$('active-model').textContent=d.action_model;$('rationale').textContent=d.rationale;$('arguments').textContent=Object.keys(d.arguments||{}).length?pretty(d.arguments):'No arguments';clearInterval(state.waitTimer);$('waitbox').style.display='none';if(d.tool==='wait'){const sec=d.arguments.seconds||0,start=Date.now();$('waitbox').style.display='block';$('wait-reason').textContent=d.arguments.reason||'Waiting';const tick=()=>{const elapsed=(Date.now()-start)/1000,remain=Math.max(0,sec-elapsed);$('wait-time').textContent=`${Math.ceil(remain)}s remaining`;$('waitbar').style.width=`${Math.min(100,elapsed/sec*100)}%`;};tick();state.waitTimer=setInterval(tick,250);}}
   function kind(e){if(e.event==='agent_decision')return'decision';if(e.event==='tool_result'&&e.tool==='send_alert'&&e.result?.message_id)return'alert';return'tool';}
+  function alertLines(body){return String(body||'Alert delivered').split(/(?<=[.!?])\s+(?=[A-Z])/).filter(Boolean).map(line=>`<div class="alert-line">${esc(line)}</div>`).join('');}
   function renderTimeline(){const list=state.events.filter(e=>state.filter==='all'||kind(e)===state.filter).slice(-80).reverse();$('timeline').innerHTML=list.length?list.map(e=>{const k=kind(e),title=k==='decision'?`${e.action_model} selected`:k==='alert'?'Operator alert delivered':`${e.action_model||e.tool} ${e.outcome?.includes('rejected')?'rejected':'completed'}`,copy=k==='decision'?e.rationale:k==='alert'?(e.arguments?.title||'Alert sent'):(e.result?.reason||e.result?.status||e.outcome||'Tool returned');return`<article class="event ${k} ${e.tool==='wait'?'wait':''}"><div class="icon">${k==='decision'?'→':k==='alert'?'!':e.tool==='wait'?'Ⅱ':'✓'}</div><div><div class="event-title"><span>${esc(title)}</span><time>${clock(e.timestamp)}</time></div><div class="event-copy">${esc(copy)}</div><details><summary>Explore event data</summary><pre>${esc(pretty(e))}</pre></details></div></article>`}).join(''):'<div class="empty">No matching events</div>';}
   function renderExperiments(){const s=sourceState(),evidence=s.evidence||{},monitoring=s.monitoring||{},done=new Set(s.completed_experiment_ids||[]),ids=[...new Set([...Object.keys(evidence),...Object.keys(monitoring)])];$('experiment-count').textContent=`${ids.length} tracked`;$('experiments').innerHTML=ids.length?ids.map(id=>{const ev=evidence[id]||{},m=monitoring[id]||{},status=ev.status||m.last_observed_status||'Discovered';return`<div class="experiment"><div class="exp-top"><span class="exp-id">${esc(id.replace('experiment-','').toUpperCase())}</span><span class="status ${done.has(id)?'done':''}">${esc(done.has(id)?'Reported':status)}</span></div><div class="exp-meta">Results ${esc(ev.results_status||'unknown')} · ${m.last_checked_at?'checked':'discovered'}</div></div>`}).join(''):'<div class="empty">No source evidence yet</div>';}
-  function renderAlerts(){const alerts=state.events.filter(e=>kind(e)==='alert').reverse();$('alert-count').textContent=`${alerts.length} sent`;$('alerts').innerHTML=alerts.length?alerts.slice(0,8).map(e=>`<div class="alert-item"><div class="alert-title">${esc(e.arguments?.title||'Operator alert')}</div><div class="alert-body">${esc(e.arguments?.body||e.outcome)}</div></div>`).join(''):'<div class="empty">No alerts delivered yet</div>';}
+  function renderAlerts(){const alerts=state.events.filter(e=>kind(e)==='alert').reverse();$('alert-count').textContent=`${alerts.length} sent`;$('alerts').innerHTML=alerts.length?alerts.map(e=>`<article class="alert-item"><div class="alert-top"><div class="alert-title">${esc(e.arguments?.title||'Operator alert')}</div><time class="alert-time">${clock(e.timestamp)}</time></div><div class="alert-resources">${(e.arguments?.resource_ids||[]).map(id=>`<span class="resource">${esc(id.replace('experiment-','').toUpperCase())}</span>`).join('')}</div><div class="alert-body">${alertLines(e.arguments?.body||e.outcome)}</div><details><summary>Delivery details</summary><pre>${esc(pretty({priority:e.arguments?.priority,receipt:e.result}))}</pre></details></article>`).join(''):'<div class="empty">No alerts delivered yet</div>';}
   function render(){renderStats();renderActivity();renderTimeline();renderExperiments();renderAlerts();}
   function add(event){state.events.push(event);if(state.events.length>500)state.events.shift();render();}
+  async function resetDemo(){if(!confirm('Clear all agent progress and start a fresh demo?'))return;const button=$('reset');button.disabled=true;button.textContent='Resetting…';try{const response=await fetch('/api/reset',{method:'POST'});const result=await response.json();if(!response.ok||result.status!=='reset')throw new Error('Reset unavailable');state.events=[];clearInterval(state.waitTimer);$('waitbox').style.display='none';$('active-tool').textContent='Starting';$('active-model').textContent='Fresh agent cycle';$('rationale').textContent='Checkpoint and dashboard history cleared. Waiting for the first new decision.';$('arguments').textContent='No arguments';render();}catch(error){alert(error.message);}finally{button.disabled=false;button.textContent='Reset demo';}}
+  $('reset').onclick=resetDemo;
   document.querySelectorAll('.filter').forEach(b=>b.onclick=()=>{document.querySelectorAll('.filter').forEach(x=>x.classList.remove('active'));b.classList.add('active');state.filter=b.dataset.filter;renderTimeline();});
   fetch('/api/events').then(r=>r.json()).then(data=>{state.events=data.events||[];render();});
   const stream=new EventSource('/api/stream');stream.onopen=()=>{$('connection').textContent='Live';};stream.onmessage=e=>add(JSON.parse(e.data));stream.onerror=()=>{$('connection').textContent='Reconnecting';};

@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from contextlib import suppress
+from pathlib import Path
 from time import monotonic, time
 
 import uvicorn
@@ -90,16 +91,39 @@ async def run_dashboard() -> None:
     settings = get_settings()
     store = DashboardEventStore(path=settings.database_path.with_suffix(".events.jsonl"))
     reporter = CompositeAgentReporter(ConsoleAgentReporter(), store)
+    reset_lock = asyncio.Lock()
+    agent_task: asyncio.Task[None] | None = None
+
+    def start_agent() -> asyncio.Task[None]:
+        """Start one supervisor task using the shared dashboard reporter."""
+        return asyncio.create_task(run_agent(reporter=reporter), name="eventpilot-agent")
+
+    async def reset_agent() -> None:
+        """Cancel the supervisor, clear durable state, and start a fresh run."""
+        nonlocal agent_task
+        async with reset_lock:
+            if agent_task and not agent_task.done():
+                agent_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await agent_task
+            for checkpoint_file in (
+                settings.database_path,
+                Path(f"{settings.database_path}-shm"),
+                Path(f"{settings.database_path}-wal"),
+            ):
+                checkpoint_file.unlink(missing_ok=True)
+            store.clear()
+            agent_task = start_agent()
+
     server = uvicorn.Server(
         uvicorn.Config(
-            create_dashboard_app(store),
+            create_dashboard_app(store, reset_agent=reset_agent),
             host=settings.dashboard_host,
             port=settings.dashboard_port,
             log_level="warning",
         )
     )
-    agent_task = asyncio.create_task(run_agent(reporter=reporter), name="eventpilot-agent")
-    agent_task.add_done_callback(lambda _task: setattr(server, "should_exit", True))
+    agent_task = start_agent()
     try:
         await server.serve()
         if not agent_task.done():

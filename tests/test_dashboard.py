@@ -45,21 +45,38 @@ def test_store_restores_durable_event_history(tmp_path: Path) -> None:
 
     assert restored_store.snapshot() == first_store.snapshot()
 
+    restored_store.clear()
+
+    assert restored_store.snapshot() == []
+    assert not event_log.exists()
+
 
 async def test_dashboard_serves_page_health_and_history() -> None:
     """Expose a ready presentation page and its initial event history."""
     store = DashboardEventStore()
     store.emit(decision_event())
+    reset_calls = 0
+
+    async def reset_agent() -> None:
+        """Record one dashboard reset request."""
+        nonlocal reset_calls
+        reset_calls += 1
+
     async with AsyncClient(
-        transport=ASGITransport(app=create_dashboard_app(store)), base_url="http://test"
+        transport=ASGITransport(app=create_dashboard_app(store, reset_agent=reset_agent)),
+        base_url="http://test",
     ) as client:
         page = await client.get("/")
         health = await client.get("/api/health")
         history = await client.get("/api/events")
+        reset = await client.post("/api/reset")
 
     assert page.status_code == 200
     assert "EventPilot" in page.text
     assert "Current agent activity" in page.text
+    assert "Reset demo" in page.text
     assert "e.event==='tool_result'&&e.tool==='send_alert'&&e.result?.message_id" in page.text
     assert health.json() == {"status": "ok"}
     assert history.json()["events"][0]["tool"] == "get_experiment"
+    assert reset.json() == {"status": "reset"}
+    assert reset_calls == 1
