@@ -1,0 +1,107 @@
+[
+  {
+    "experiment": {
+      "id": "experiment-egfr",
+      "code": "ORG-001-001",
+      "name": "EGFR Binding Screen",
+      "status": "InQueue",
+      "experiment_type": "screening",
+      "experiment_spec": {"experiment_type": "screening", "method": "bli"},
+      "created_at": "2026-07-01T10:00:00Z",
+      "results_status": "None",
+      "experiment_url": "https://foundry.example/experiments/experiment-egfr"
+    },
+    "lifecycle": ["InQueue", "DataAnalysis", "Done"],
+    "updates": [
+      {
+        "id": "update-egfr-processing",
+        "experiment_id": "experiment-egfr",
+        "experiment_code": "ORG-001-001",
+        "name": "EGFR screen entered analysis",
+        "timestamp": "2026-07-25T08:00:00Z"
+      }
+    ],
+    "results": [
+      {
+        "id": "result-egfr",
+        "title": "EGFR binding screen",
+        "experiment_id": "experiment-egfr",
+        "result_type": "screening",
+        "created_at": "2026-07-25T09:00:00Z",
+        "summary": {"classification": "binder"},
+        "metadata": {},
+        "data_package_url": "https://foundry.example/results/experiment-egfr.zip"
+      }
+    ]
+  },
+  {
+    "experiment": {
+      "id": "experiment-kras",
+      "code": "ORG-001-002",
+      "name": "KRAS Expression Run",
+      "status": "InProduction",
+      "experiment_type": "expression",
+      "experiment_spec": {"experiment_type": "expression", "host": "ecoli"},
+      "created_at": "2026-07-02T10:00:00Z",
+      "results_status": "None",
+      "experiment_url": "https://foundry.example/experiments/experiment-kras"
+    },
+    "lifecycle": ["InProduction", "InReview", "Done"],
+    "updates": [
+      {
+        "id": "update-kras-review",
+        "experiment_id": "experiment-kras",
+        "experiment_code": "ORG-001-002",
+        "name": "KRAS run awaiting review",
+        "timestamp": "2026-07-25T08:15:00Z"
+      }
+    ],
+    "results": [
+      {
+        "id": "result-kras",
+        "title": "KRAS expression yield",
+        "experiment_id": "experiment-kras",
+        "result_type": "expression",
+        "created_at": "2026-07-25T09:15:00Z",
+        "summary": {"yield_mg": 18.4},
+        "metadata": {},
+        "data_package_url": "https://foundry.example/results/experiment-kras.zip"
+      }
+    ]
+  },
+  {
+    "experiment": {
+      "id": "experiment-her2",
+      "code": "ORG-001-003",
+      "name": "HER2 Affinity Panel",
+      "status": "WaitingForMaterials",
+      "experiment_type": "screening",
+      "experiment_spec": {"experiment_type": "screening", "method": "spr"},
+      "created_at": "2026-07-03T10:00:00Z",
+      "results_status": "None",
+      "experiment_url": "https://foundry.example/experiments/experiment-her2"
+    },
+    "lifecycle": ["WaitingForMaterials", "InQueue", "InProduction", "Done"],
+    "updates": [
+      {
+        "id": "update-her2-materials",
+        "experiment_id": "experiment-her2",
+        "experiment_code": "ORG-001-003",
+        "name": "HER2 materials received",
+        "timestamp": "2026-07-25T08:30:00Z"
+      }
+    ],
+    "results": [
+      {
+        "id": "result-her2",
+        "title": "HER2 affinity panel",
+        "experiment_id": "experiment-her2",
+        "result_type": "screening",
+        "created_at": "2026-07-25T09:30:00Z",
+        "summary": {"top_kd_nm": 2.7},
+        "metadata": {},
+        "data_package_url": "https://foundry.example/results/experiment-her2.zip"
+      }
+    ]
+  }
+]

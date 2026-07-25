@@ -8,19 +8,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Load autonomous runtime, Foundry, and LLM configuration from the environment."""
+    """Load autonomous runtime and LLM configuration from the environment."""
 
     model_config = SettingsConfigDict(env_prefix="EVENTPILOT_", env_file=".env", extra="ignore")
 
     notification_destination: str = "local-console"
     database_path: Path = Path(".eventpilot/checkpoints.sqlite")
-    mock_foundry: bool = False
     mock_llm: bool = False
-    foundry_api_token: SecretStr | None = Field(default=None, validation_alias="FOUNDRY_API_TOKEN")
-    foundry_api_base: str = Field(
-        default="https://devs.adaptyvbio.com/api/v1",
-        validation_alias="FOUNDRY_API_BASE",
-    )
     llm_provider: str | None = Field(default=None, validation_alias="LLM_PROVIDER")
     llm_model: str | None = Field(default=None, validation_alias="LLM_MODEL")
     llm_api_key: SecretStr | None = Field(default=None, validation_alias="LLM_API_KEY")

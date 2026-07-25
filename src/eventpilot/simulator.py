@@ -1,108 +1,129 @@
-"""Provide an API-compatible Foundry simulator for local demonstrations."""
+"""Provide a fixture-backed mock of the Foundry API."""
 
-from datetime import UTC, datetime
-from typing import Any
+import json
+from importlib.resources import files
+from typing import Any, Self
+
+from pydantic import BaseModel, Field, model_validator
 
 from eventpilot.adapters.adaptyv import (
     ExperimentPage,
+    ExperimentStatus,
     FoundryExperiment,
     FoundryExperimentSummary,
     FoundryResult,
     FoundryUpdate,
     ResultPage,
+    ResultsStatus,
     UpdatePage,
 )
 
-EXPERIMENT_ID = "019d4a2b-2b7e-7c3a-9f1e-2a4b6c8d0e1f"
-RESULT_ID = "019d4a2c-3c8f-7d4b-a02f-3b5c7d9e1f20"
+
+class ExperimentScenario(BaseModel):
+    """Describe one experiment and the API snapshots it exposes over time."""
+
+    experiment: FoundryExperiment
+    lifecycle: list[ExperimentStatus] = Field(min_length=1)
+    updates: list[FoundryUpdate] = Field(default_factory=list)
+    results: list[FoundryResult] = Field(default_factory=list)
+    result_delay_reads: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_related_records(self) -> Self:
+        """Reject fixture records attached to a different experiment identifier."""
+        experiment_id = self.experiment.id
+        if any(update.experiment_id != experiment_id for update in self.updates):
+            raise ValueError("Every update must belong to its scenario experiment")
+        if any(result.experiment_id != experiment_id for result in self.results):
+            raise ValueError("Every result must belong to its scenario experiment")
+        return self
 
 
-def mock_experiment(*, status: str = "Done", results_status: str = "All") -> FoundryExperiment:
-    """Build one fixture matching the documented Foundry detail response."""
-    return FoundryExperiment.model_validate(
-        {
-            "id": EXPERIMENT_ID,
-            "code": "ORG-001-123",
-            "name": "EGFR Binding Screen",
-            "status": status,
-            "experiment_type": "screening",
-            "experiment_spec": {"experiment_type": "screening", "method": "bli"},
-            "created_at": "2026-07-01T10:00:00Z",
-            "results_status": results_status,
-            "experiment_url": f"https://foundry.adaptyvbio.com/experiments/{EXPERIMENT_ID}",
-        }
-    )
+class MockFoundryClient:
+    """Serve any fixture collection through the same API protocol used by the agent."""
 
+    def __init__(self, scenarios: list[ExperimentScenario]) -> None:
+        """Create independent lifecycle cursors for a non-empty experiment collection."""
+        if not scenarios:
+            raise ValueError("At least one mock experiment is required")
+        self._scenarios = {scenario.experiment.id: scenario for scenario in scenarios}
+        if len(self._scenarios) != len(scenarios):
+            raise ValueError("Mock experiment identifiers must be unique")
+        self._indexes = dict.fromkeys(self._scenarios, 0)
+        self.inspected_ids: list[str] = []
 
-class ProgressingFoundryClient:
-    """Mock the documented Foundry endpoints while experiment state advances externally."""
-
-    def __init__(self, statuses: list[str]) -> None:
-        """Store a non-empty lifecycle sequence returned by successive detail calls."""
-        if not statuses:
-            raise ValueError("At least one mock status is required")
-        self._statuses = statuses
-        self._index = 0
+    @classmethod
+    def from_fixture(cls) -> Self:
+        """Load the default mock experiment collection packaged with EventPilot."""
+        return cls(load_scenarios())
 
     async def list_experiments(self, *, limit: int = 50, offset: int = 0) -> ExperimentPage:
-        """Return the documented paginated list shape without advancing external state."""
-        experiment = self._current_experiment()
-        summary = FoundryExperimentSummary.model_validate(experiment.model_dump(mode="json"))
-        items = [summary][offset : offset + limit]
-        return ExperimentPage(items=items, total=1, count=len(items), offset=offset)
+        """Return a paginated snapshot of every experiment in the mock organization."""
+        summaries = [
+            FoundryExperimentSummary.model_validate(
+                self._current_experiment(experiment_id).model_dump(mode="json")
+            )
+            for experiment_id in self._scenarios
+        ]
+        items = summaries[offset : offset + limit]
+        return ExperimentPage(items=items, total=len(summaries), count=len(items), offset=offset)
 
     async def get_experiment(self, experiment_id: str) -> FoundryExperiment:
-        """Return the next detailed snapshot as if Foundry changed between polls."""
-        self._require_experiment(experiment_id)
-        experiment = self._current_experiment()
-        self._index += 1
+        """Return the selected experiment and advance only its external lifecycle."""
+        experiment = self._current_experiment(experiment_id)
+        self.inspected_ids.append(experiment_id)
+        self._indexes[experiment_id] += 1
         return experiment
 
     async def list_experiment_updates(self, experiment_id: str) -> UpdatePage:
-        """Return one documented progress-update record for the experiment."""
-        self._require_experiment(experiment_id)
-        item = FoundryUpdate(
-            id="019d4a2d-4d90-7e5c-b13f-4c6d8e0f2a31",
-            experiment_id=EXPERIMENT_ID,
-            experiment_code="ORG-001-123",
-            name="Experiment processing update",
-            timestamp=datetime.now(UTC),
+        """Return progress events belonging to the selected experiment."""
+        scenario = self._scenario(experiment_id)
+        return UpdatePage(
+            items=scenario.updates,
+            total=len(scenario.updates),
+            count=len(scenario.updates),
+            offset=0,
         )
-        return UpdatePage(items=[item], total=1, count=1, offset=0)
 
     async def list_experiment_results(self, experiment_id: str) -> ResultPage:
-        """Return a documented result page once the mock experiment is complete."""
-        self._require_experiment(experiment_id)
-        experiment = self._current_experiment()
-        if experiment.results_status == "None":
-            return ResultPage(items=[], total=0, count=0, offset=0)
-        item = FoundryResult(
-            id=RESULT_ID,
-            title="EGFR binding screen",
-            experiment_id=EXPERIMENT_ID,
-            result_type="screening",
-            created_at=datetime.now(UTC),
-            summary={"classification": "binder"},
-            metadata={},
-            data_package_url="https://foundry.adaptyvbio.com/results/package.zip",
-        )
-        return ResultPage(items=[item], total=1, count=1, offset=0)
+        """Return results only after their configured lifecycle snapshot is available."""
+        scenario = self._scenario(experiment_id)
+        experiment = self._current_experiment(experiment_id)
+        items = scenario.results if experiment.results_status != ResultsStatus.NONE else []
+        return ResultPage(items=items, total=len(items), count=len(items), offset=0)
 
-    def _current_experiment(self) -> FoundryExperiment:
-        """Build the snapshot at the mock API's current external-state index."""
-        status = self._statuses[min(self._index, len(self._statuses) - 1)]
-        return mock_experiment(
-            status=status,
-            results_status="All" if status == "Done" else "None",
+    def _current_experiment(self, experiment_id: str) -> FoundryExperiment:
+        """Render current status and result availability over immutable fixture details."""
+        scenario = self._scenario(experiment_id)
+        index = self._indexes[experiment_id]
+        status = scenario.lifecycle[min(index, len(scenario.lifecycle) - 1)]
+        results_available = (
+            bool(scenario.results)
+            and status == ExperimentStatus.DONE
+            and index >= scenario.result_delay_reads
+        )
+        return scenario.experiment.model_copy(
+            update={
+                "status": status,
+                "results_status": ResultsStatus.ALL if results_available else ResultsStatus.NONE,
+            }
         )
 
-    @staticmethod
-    def _require_experiment(experiment_id: str) -> None:
-        """Raise the same not-found boundary for unsupported mock identifiers."""
-        if experiment_id != EXPERIMENT_ID:
-            raise LookupError(f"Mock Foundry experiment not found: {experiment_id}")
+    def _scenario(self, experiment_id: str) -> ExperimentScenario:
+        """Resolve one fixture scenario or match the API's not-found boundary."""
+        try:
+            return self._scenarios[experiment_id]
+        except KeyError as exc:
+            raise LookupError(f"Mock Foundry experiment not found: {experiment_id}") from exc
 
 
 def tool_names(transcript: list[dict[str, Any]]) -> list[str]:
     """Extract tool names from an agent transcript for readable trajectory assertions."""
     return [str(entry["tool"]) for entry in transcript]
+
+
+def load_scenarios() -> list[ExperimentScenario]:
+    """Parse a fresh copy of every packaged experiment scenario."""
+    fixture = files("eventpilot.fixtures").joinpath("experiments.json")
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    return [ExperimentScenario.model_validate(item) for item in payload]

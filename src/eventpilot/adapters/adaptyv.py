@@ -1,11 +1,9 @@
-"""Document and access the Adaptyv Foundry experiment API."""
+"""Model the Adaptyv Foundry API exposed to the autonomous agent."""
 
 from datetime import datetime
 from enum import StrEnum
-from types import TracebackType
-from typing import Any, Protocol, Self
+from typing import Any, Protocol
 
-import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -125,68 +123,3 @@ class FoundryClient(Protocol):
     async def list_experiment_results(self, experiment_id: str) -> ResultPage:
         """List available analysis results for one experiment."""
         ...
-
-
-class FoundryHttpClient:
-    """Call the documented Foundry REST API with bearer authentication."""
-
-    def __init__(
-        self,
-        base_url: str,
-        token: str,
-        *,
-        timeout_seconds: float = 20,
-        transport: httpx.AsyncBaseTransport | None = None,
-    ) -> None:
-        """Create an HTTP client scoped to the Foundry v1 API."""
-        self._client = httpx.AsyncClient(
-            base_url=base_url.rstrip("/"),
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-            timeout=timeout_seconds,
-            transport=transport,
-        )
-
-    async def __aenter__(self) -> Self:
-        """Return the open client for an asynchronous runtime scope."""
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        """Close pooled HTTP connections when the runtime exits."""
-        await self._client.aclose()
-
-    async def list_experiments(self, *, limit: int = 50, offset: int = 0) -> ExperimentPage:
-        """Call `GET /experiments` using documented pagination parameters."""
-        payload = await self._get("/experiments", params={"limit": limit, "offset": offset})
-        return ExperimentPage.model_validate(payload)
-
-    async def get_experiment(self, experiment_id: str) -> FoundryExperiment:
-        """Call `GET /experiments/{experiment_id}`."""
-        payload = await self._get(f"/experiments/{experiment_id}")
-        return FoundryExperiment.model_validate(payload)
-
-    async def list_experiment_updates(self, experiment_id: str) -> UpdatePage:
-        """Call `GET /experiments/{experiment_id}/updates`."""
-        payload = await self._get(f"/experiments/{experiment_id}/updates")
-        return UpdatePage.model_validate(payload)
-
-    async def list_experiment_results(self, experiment_id: str) -> ResultPage:
-        """Call `GET /experiments/{experiment_id}/results`."""
-        payload = await self._get(f"/experiments/{experiment_id}/results")
-        return ResultPage.model_validate(payload)
-
-    async def _get(self, path: str, *, params: dict[str, int] | None = None) -> Any:
-        """Execute one authenticated GET and surface a useful API error."""
-        response = await self._client.get(path, params=params)
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            request_id = response.headers.get("x-request-id", "unknown")
-            raise RuntimeError(
-                f"Foundry API request failed ({response.status_code}, request_id={request_id})"
-            ) from exc
-        return response.json()

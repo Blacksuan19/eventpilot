@@ -295,7 +295,6 @@ name = "eventpilot"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "httpx" },
     { name = "instructor" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
@@ -313,7 +312,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx", specifier = "==0.28.1" },
     { name = "instructor", specifier = "==1.15.4" },
     { name = "langgraph", specifier = "==1.2.9" },
     { name = "langgraph-checkpoint-sqlite", specifier = "==3.1.0" },

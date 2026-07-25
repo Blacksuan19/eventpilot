@@ -8,7 +8,6 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "httpx==0.28.1",
     "instructor==1.15.4",
     "langgraph==1.2.9",
     "langgraph-checkpoint-sqlite==3.1.0",

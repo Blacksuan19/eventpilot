@@ -2,12 +2,9 @@
 
 import argparse
 import asyncio
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-from eventpilot.adapters.adaptyv import FoundryClient, FoundryHttpClient
 from eventpilot.config import Settings, get_settings
 from eventpilot.core.agent_reasoning import (
     AutonomousReasoningEngine,
@@ -16,7 +13,7 @@ from eventpilot.core.agent_reasoning import (
 )
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
 from eventpilot.notifications.console import ConsoleNotificationSink
-from eventpilot.simulator import ProgressingFoundryClient
+from eventpilot.simulator import MockFoundryClient
 
 
 def _build_reasoning_engine(
@@ -35,23 +32,6 @@ def _build_reasoning_engine(
     )
 
 
-@asynccontextmanager
-async def _foundry_client(settings: Settings) -> AsyncIterator[FoundryClient]:
-    """Open the real Foundry client or provide the API-compatible offline simulator."""
-    if settings.mock_foundry:
-        yield ProgressingFoundryClient(
-            ["InQueue", "InProduction", "DataAnalysis", "InReview", "Done"]
-        )
-        return
-    if settings.foundry_api_token is None:
-        raise RuntimeError("Configure FOUNDRY_API_TOKEN or set EVENTPILOT_MOCK_FOUNDRY=true")
-    async with FoundryHttpClient(
-        settings.foundry_api_base,
-        settings.foundry_api_token.get_secret_value(),
-    ) as client:
-        yield client
-
-
 async def run_agent(*, max_cycles: int | None = None) -> None:
     """Run the autonomous supervisor continuously or for a bounded local demonstration."""
     settings = get_settings()
@@ -59,10 +39,8 @@ async def run_agent(*, max_cycles: int | None = None) -> None:
     agent = _build_reasoning_engine(
         settings, max_tool_calls_per_cycle=12 if max_cycles is not None else 32
     )
-    async with (
-        _foundry_client(settings) as foundry,
-        AsyncSqliteSaver.from_conn_string(str(settings.database_path)) as checkpointer,
-    ):
+    foundry = MockFoundryClient.from_fixture()
+    async with AsyncSqliteSaver.from_conn_string(str(settings.database_path)) as checkpointer:
         graph = build_autonomous_graph(
             agent,
             foundry,
