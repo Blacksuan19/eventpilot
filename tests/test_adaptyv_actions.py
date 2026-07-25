@@ -19,9 +19,10 @@ from eventpilot.adapters.adaptyv.tools import (
 from eventpilot.core.agent_reasoning import AgentTurn, FinishCycle
 from eventpilot.core.approvals import ApprovalDecision
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
+from eventpilot.core.monitoring import SelectObjective
 from eventpilot.core.notifications import DeliveryResult, Notification
 from eventpilot.core.reporting import AgentEvent, ApprovalRequestedEvent
-from eventpilot.sources.adaptyv import AdaptyvDataSource, SelectObjective
+from eventpilot.sources.adaptyv import AdaptyvDataSource
 
 
 class StaticClock:
@@ -76,7 +77,7 @@ class QuoteActionAgent:
                     rationale="Select every active experiment.",
                     action=SelectObjective(
                         kind="monitor",
-                        experiment_ids=experiment_ids,
+                        resource_ids=experiment_ids,
                         summary="Monitor the full portfolio.",
                     ),
                 ),

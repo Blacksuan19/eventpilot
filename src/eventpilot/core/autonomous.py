@@ -15,12 +15,27 @@ from eventpilot.core.agent_reasoning import (
     AgentTurn,
     AutonomousReasoningEngine,
     FinishCycle,
+    SelectObjective,
     SendAlert,
     Wait,
     available_tool_types,
     parse_core_tool,
 )
 from eventpilot.core.approvals import ApprovalDecision
+from eventpilot.core.monitoring import (
+    after_wait,
+    apply_execution,
+    available_source_tools,
+    initial_state,
+    record_alert,
+    record_finish,
+    select_objective,
+    should_continue_after_alert,
+    validate_alert,
+    validate_finish,
+    validate_source_action,
+    validate_wait,
+)
 from eventpilot.core.notifications import Notification, NotificationPriority
 from eventpilot.core.reporting import (
     AgentDecisionEvent,
@@ -75,8 +90,8 @@ def build_autonomous_graph(
     event_reporter = reporter or ConsoleAgentReporter()
 
     def source_state(state: AutonomousAgentState) -> dict[str, Any]:
-        """Return persisted source state or the plugin's initial state."""
-        return state.get("source_state", source.initial_state())
+        """Return persisted graph-owned monitoring state or a fresh state."""
+        return state.get("source_state", initial_state())
 
     async def reason(state: AutonomousAgentState) -> AutonomousAgentState:
         """Let the reasoning engine select one core or source-provided tool."""
@@ -113,7 +128,11 @@ def build_autonomous_graph(
             return "wait"
         if isinstance(action, FinishCycle):
             return "finish_cycle"
-        if action.tool_name in source.available_tools(source_state(state)):
+        if isinstance(action, SelectObjective):
+            return "select_objective"
+        if action.tool_name in available_source_tools(source, source_state(state)):
+            if validate_source_action(action, source_state(state)):
+                return "reject_action"
             if (
                 isinstance(source, ApprovalAwareDataSource)
                 and source.approval_request(action, source_state(state)) is not None
@@ -129,14 +148,25 @@ def build_autonomous_graph(
             state=source_state(state),
             transcript=state.get("transcript", []),
             clock=clock,
-            max_tool_calls_per_cycle=max_tool_calls_per_cycle,
         )
         execution = await source.execute(action, context)
-        update = _tool_result(state, action, execution.result)
-        update["source_state"] = execution.state
+        result, next_source_state = apply_execution(
+            execution, source_state(state), observed_at=clock()
+        )
+        update = _tool_result(state, action, result)
+        update["source_state"] = next_source_state
         update["pending_approval"] = None
         update["approval_decision"] = None
-        report_tool_result(state, action, execution.result, update)
+        report_tool_result(state, action, result, update)
+        return update
+
+    async def choose_objective(state: AutonomousAgentState) -> AutonomousAgentState:
+        """Validate and persist a generic monitoring objective in graph state."""
+        action = _expect_action(state, source, SelectObjective)
+        result, next_source_state = select_objective(action, source_state(state))
+        update = _tool_result(state, action, result)
+        update["source_state"] = next_source_state
+        report_tool_result(state, action, result, update)
         return update
 
     async def request_approval(state: AutonomousAgentState) -> AutonomousAgentState:
@@ -224,7 +254,7 @@ def build_autonomous_graph(
         """Deliver an alert and continue working within the current cycle."""
         action = _expect_action(state, source, SendAlert)
         current_source_state = source_state(state)
-        rejection = source.validate_alert(action.resource_ids, current_source_state)
+        rejection = validate_alert(action.resource_ids, current_source_state)
         if rejection:
             update = _rejected_tool_result(state, action, rejection)
             report_tool_result(state, action, update.get("transcript", [])[-1]["result"], update)
@@ -234,10 +264,10 @@ def build_autonomous_graph(
             Notification(title=action.title, body=action.body, priority=action.priority),
         )
         update = _tool_result(state, action, receipt.model_dump(mode="json"))
-        update["source_state"] = source.record_alert(
+        update["source_state"] = record_alert(
             action.resource_ids, current_source_state, delivered_at=clock()
         )
-        if not source.should_continue_after_alert(update["source_state"]):
+        if not should_continue_after_alert(update["source_state"]):
             update.update(
                 cycle_summary=f"Delivered alert for {', '.join(action.resource_ids)}.",
                 cycle_count=state.get("cycle_count", 0) + 1,
@@ -252,14 +282,16 @@ def build_autonomous_graph(
     async def wait(state: AutonomousAgentState) -> AutonomousAgentState:
         """Pause for the model-selected interval and notify the source scheduler."""
         action = _expect_action(state, source, Wait)
-        rejection = source.validate_wait(source_state(state))
+        rejection = validate_wait(source_state(state))
         if rejection:
             update = _rejected_tool_result(state, action, rejection)
             report_tool_result(state, action, update.get("transcript", [])[-1]["result"], update)
             return update
         elapsed_seconds = min(action.seconds, max_wait_seconds or action.seconds)
         wake_at = clock() + elapsed_seconds
-        wait_sleep = idle_sleep if source.is_idle(source_state(state)) and idle_sleep else sleep
+        wait_sleep = (
+            idle_sleep if source_state(state).get("phase") == "idle" and idle_sleep else sleep
+        )
         await wait_sleep(elapsed_seconds)
         update = _tool_result(
             state,
@@ -271,7 +303,7 @@ def build_autonomous_graph(
                 "reason": action.reason,
             },
         )
-        update["source_state"] = source.after_wait(
+        update["source_state"] = after_wait(
             source_state(state), requested_seconds=action.seconds, wake_at=wake_at
         )
         report_tool_result(
@@ -285,13 +317,9 @@ def build_autonomous_graph(
         return update
 
     async def finish_cycle(state: AutonomousAgentState) -> AutonomousAgentState:
-        """End one bounded invocation after source-owned policy approves completion."""
+        """End one bounded invocation after graph-owned policy approves completion."""
         action = _expect_action(state, source, FinishCycle)
-        rejection = source.validate_finish(
-            source_state(state),
-            tool_count=state.get("tool_count", 0),
-            max_tool_calls=max_tool_calls_per_cycle,
-        )
+        rejection = validate_finish(source_state(state))
         if rejection:
             update = _rejected_tool_result(state, action, rejection)
             report_tool_result(state, action, update.get("transcript", [])[-1]["result"], update)
@@ -299,7 +327,7 @@ def build_autonomous_graph(
         update: AutonomousAgentState = {
             "cycle_summary": action.summary,
             "cycle_count": state.get("cycle_count", 0) + 1,
-            "source_state": source.record_finish(source_state(state)),
+            "source_state": record_finish(source_state(state)),
             "tool_count": 0,
             "outcome": "cycle_finished",
         }
@@ -359,6 +387,7 @@ def build_autonomous_graph(
     builder = StateGraph(AutonomousAgentState)
     builder.add_node("agent", reason)
     builder.add_node("source_tool", source_tool)
+    builder.add_node("select_objective", choose_objective)
     builder.add_node("request_approval", request_approval)
     builder.add_node("human_approval", human_approval)
     builder.add_node("reject_approval", reject_approval)
@@ -372,6 +401,7 @@ def build_autonomous_graph(
         route_tool,
         {
             "source_tool": "source_tool",
+            "select_objective": "select_objective",
             "request_approval": "request_approval",
             "send_alert": "send_alert",
             "wait": "wait",
@@ -381,6 +411,7 @@ def build_autonomous_graph(
     )
     builder.add_edge("request_approval", "human_approval")
     builder.add_edge("source_tool", "agent")
+    builder.add_edge("select_objective", "agent")
     builder.add_edge("reject_approval", "agent")
     builder.add_edge("wait", "agent")
     builder.add_edge("reject_action", "agent")

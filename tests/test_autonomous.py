@@ -25,11 +25,13 @@ from eventpilot.core.agent_reasoning import (
     SendAlert,
     Wait,
 )
+from eventpilot.core.approvals import ApprovalDecision
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
 from eventpilot.core.clock import AcceleratedClock
+from eventpilot.core.monitoring import SelectObjective, initial_state
 from eventpilot.core.notifications import DeliveryResult, Notification
 from eventpilot.core.reporting import AgentDecisionEvent, AgentEvent, ToolResultEvent
-from eventpilot.sources.adaptyv import AdaptyvDataSource, SelectObjective
+from eventpilot.sources.adaptyv import AdaptyvDataSource
 from eventpilot.sources.adaptyv_demo import DemoAdaptyvReasoningEngine
 
 
@@ -333,8 +335,8 @@ async def test_idle_agent_waits_without_sending_an_update() -> None:
         {
             "transcript": [],
             "source_state": {
-                **AdaptyvDataSource(foundry).initial_state(),
-                "completed_experiment_ids": [load_scenarios()[0].experiment.id],
+                **initial_state(),
+                "completed_resource_ids": [load_scenarios()[0].experiment.id],
             },
         },
         config={"configurable": {"thread_id": "idle-test"}},
@@ -365,11 +367,11 @@ async def test_agent_selects_the_discovered_experiment_portfolio() -> None:
                 },
             }
         ],
-        {"completed_experiment_ids": []},
+        {"completed_resource_ids": []},
     )
 
     assert isinstance(turn.action, SelectObjective)
-    assert turn.action.experiment_ids == ["complete", "active"]
+    assert turn.action.resource_ids == ["complete", "active"]
 
 
 async def test_supervisor_completes_two_experiments_across_fresh_cycles() -> None:
@@ -401,7 +403,7 @@ async def test_supervisor_completes_two_experiments_across_fresh_cycles() -> Non
         f"Experiment {experiment_ids[0]} results are ready",
     ]
     assert result.get("cycle_count") == 2
-    assert result.get("source_state", {}).get("completed_experiment_ids") == list(
+    assert result.get("source_state", {}).get("completed_resource_ids") == list(
         reversed(experiment_ids)
     )
 
@@ -417,7 +419,7 @@ async def test_result_delivery_is_idempotent_across_fresh_cycles() -> None:
                 rationale="Scope result delivery.",
                 action=SelectObjective(
                     kind="report_results",
-                    experiment_ids=[experiment_id],
+                    resource_ids=[experiment_id],
                     summary="Report available results.",
                 ),
             ),
@@ -450,7 +452,7 @@ async def test_result_delivery_is_idempotent_across_fresh_cycles() -> None:
     result = await AgentRuntime(graph).run(max_cycles=2)
 
     assert len(sink.notifications) == 1
-    assert result.get("source_state", {}).get("completed_experiment_ids") == [experiment_id]
+    assert result.get("source_state", {}).get("completed_resource_ids") == [experiment_id]
     assert tool_names(result.get("transcript", [])) == ["list_experiments", "wait"]
 
 
@@ -468,7 +470,7 @@ async def test_result_alerts_cannot_group_experiments() -> None:
                 rationale="Group related completed results.",
                 action=SelectObjective(
                     kind="report_results",
-                    experiment_ids=experiment_ids,
+                    resource_ids=experiment_ids,
                     summary="Report both completed experiments.",
                 ),
             ),
@@ -518,7 +520,7 @@ async def test_result_alerts_cannot_group_experiments() -> None:
     assert grouped["result"]["status"] == "rejected"
     assert "separate" in grouped["result"]["reason"]
     assert len(sink.notifications) == 2
-    assert result.get("source_state", {}).get("completed_experiment_ids") == experiment_ids
+    assert result.get("source_state", {}).get("completed_resource_ids") == experiment_ids
 
 
 async def test_ready_result_blocks_wait_and_finish_until_reported() -> None:
@@ -532,7 +534,7 @@ async def test_ready_result_blocks_wait_and_finish_until_reported() -> None:
                 rationale="Monitor discovered work.",
                 action=SelectObjective(
                     kind="monitor",
-                    experiment_ids=[experiment_id],
+                    resource_ids=[experiment_id],
                     summary="Monitor the experiment.",
                 ),
             ),
@@ -586,7 +588,7 @@ async def test_graph_requires_a_complete_monitoring_portfolio() -> None:
                 rationale="Incorrectly focus on only the first experiment.",
                 action=SelectObjective(
                     kind="monitor",
-                    experiment_ids=[experiment_ids[0]],
+                    resource_ids=[experiment_ids[0]],
                     summary="Monitor the first experiment.",
                 ),
             ),
@@ -594,7 +596,7 @@ async def test_graph_requires_a_complete_monitoring_portfolio() -> None:
                 rationale="Correct the objective to cover concurrent work.",
                 action=SelectObjective(
                     kind="monitor",
-                    experiment_ids=experiment_ids,
+                    resource_ids=experiment_ids,
                     summary="Monitor both experiments.",
                 ),
             ),
@@ -657,7 +659,7 @@ async def test_graph_accepts_multi_experiment_monitor_objective() -> None:
                 rationale="Invalid broad monitor.",
                 action=SelectObjective(
                     kind="monitor",
-                    experiment_ids=experiment_ids,
+                    resource_ids=experiment_ids,
                     summary="Monitor everything.",
                 ),
             ),
@@ -704,7 +706,7 @@ async def test_graph_accepts_multi_experiment_monitor_objective() -> None:
     result = await AgentRuntime(graph).run(max_cycles=1)
 
     objective = result.get("transcript", [])[1]
-    assert objective["result"]["experiment_ids"] == experiment_ids
+    assert objective["result"]["resource_ids"] == experiment_ids
     assert len(sink.notifications) == 2
 
 
@@ -726,7 +728,7 @@ async def test_active_monitor_requires_agent_selected_wait_before_reporting() ->
                 rationale="Monitor the active experiment.",
                 action=SelectObjective(
                     kind="monitor",
-                    experiment_ids=[experiment_id],
+                    resource_ids=[experiment_id],
                     summary="Monitor queue progress.",
                 ),
             ),
@@ -803,7 +805,7 @@ async def test_monitor_can_yield_when_graph_tool_budget_is_exhausted() -> None:
                 rationale="Monitor one experiment.",
                 action=SelectObjective(
                     kind="monitor",
-                    experiment_ids=[experiment_id],
+                    resource_ids=[experiment_id],
                     summary="Monitor queue progress.",
                 ),
             ),
@@ -877,7 +879,7 @@ async def test_sqlite_checkpoint_survives_fresh_cycles(tmp_path: Path) -> None:
     assert second.get("cycle_count") == 2
     assert len(second.get("transcript", [])) == 7
     second_source_state = second.get("source_state", {})
-    assert second_source_state.get("completed_experiment_ids") == experiment_ids
+    assert second_source_state.get("completed_resource_ids") == experiment_ids
     assert set(second_source_state.get("monitoring", {})) == set(experiment_ids)
 
 
@@ -902,9 +904,15 @@ async def test_agent_handles_fuzzed_experiment_collections(seed: int) -> None:
         clock=clock,
     )
 
-    result = await AgentRuntime(graph).run(max_cycles=len(fuzzed))
+    result = await AgentRuntime(graph, automatic_approval=ApprovalDecision.APPROVED).run(
+        max_cycles=len(fuzzed)
+    )
 
-    completed_ids = result.get("source_state", {}).get("completed_experiment_ids", [])
+    completed_ids = result.get("source_state", {}).get("completed_resource_ids", [])
+    result_notifications = [
+        notification
+        for notification in sink.notifications
+        if "results are ready" in notification.title
+    ]
     assert set(completed_ids) == set(expected_ids)
-    assert len(sink.notifications) == len(fuzzed)
-    assert all("results are ready" in notification.title for notification in sink.notifications)
+    assert len(result_notifications) == len(fuzzed)

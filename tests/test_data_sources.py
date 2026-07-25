@@ -1,14 +1,20 @@
 """Prove the generic graph accepts tools from an unrelated monitoring source."""
 
-from copy import deepcopy
 from typing import Any, Literal
 
 from eventpilot.adapters.adaptyv.mock import MockFoundryClient
 from eventpilot.adapters.adaptyv.tools import FoundryToolAdapter, ListExperiments
 from eventpilot.core.agent_reasoning import AgentTurn, SendAlert, build_tool_catalog
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
+from eventpilot.core.monitoring import SelectObjective
 from eventpilot.core.notifications import DeliveryResult, Notification
-from eventpilot.sources.base import SourceContext, SourceExecution, SourceToolCall
+from eventpilot.sources.base import (
+    ResourceSnapshot,
+    SourceContext,
+    SourceEffect,
+    SourceExecution,
+    SourceToolCall,
+)
 
 
 class ListWorkflowRuns(SourceToolCall):
@@ -30,21 +36,8 @@ class GitHubActionsTestSource:
 
     name = "github-actions-test"
     instructions = "Discover workflow runs, inspect failures, and alert operators."
+    discovery_tool = "list_workflow_runs"
     tool_types: tuple[type[SourceToolCall], ...] = (ListWorkflowRuns, GetWorkflowRun)
-
-    def initial_state(self) -> dict[str, Any]:
-        """Return empty workflow-run evidence."""
-        return {"phase": "discovery", "observed_run_ids": []}
-
-    def available_tools(self, state: dict[str, Any]) -> set[str]:
-        """Expose discovery before inspection, like a real source policy."""
-        if state.get("phase") == "inspection":
-            return {"get_workflow_run"}
-        return {"list_workflow_runs"}
-
-    def is_idle(self, state: dict[str, Any]) -> bool:
-        """Treat the compact GitHub fixture as continuously discoverable."""
-        return False
 
     def parse_tool(self, payload: dict[str, Any]) -> SourceToolCall:
         """Validate one of this source's two unrelated tool schemas."""
@@ -56,62 +49,37 @@ class GitHubActionsTestSource:
 
     async def execute(self, action: SourceToolCall, context: SourceContext) -> SourceExecution:
         """Return representative JSON that a `gh` subprocess adapter could produce."""
-        state = deepcopy(context.state)
         if isinstance(action, ListWorkflowRuns):
-            state["phase"] = "inspection"
+            run = {"id": "4815", "repository": action.repository, "conclusion": "failure"}
             return SourceExecution(
-                result={
-                    "runs": [
-                        {"id": "4815", "repository": action.repository, "conclusion": "failure"}
-                    ]
-                },
-                state=state,
+                result={"runs": [run], "total": 1},
+                effects=(
+                    SourceEffect(
+                        "discovery",
+                        resources=(
+                            ResourceSnapshot(
+                                resource_id="4815",
+                                status="failure",
+                                payload=run,
+                            ),
+                        ),
+                    ),
+                ),
             )
         if isinstance(action, GetWorkflowRun):
-            state.setdefault("observed_run_ids", []).append(action.run_id)
             return SourceExecution(
                 result={"id": action.run_id, "conclusion": "failure", "failed_job": "tests"},
-                state=state,
+                effects=(
+                    SourceEffect(
+                        "observation",
+                        resource_id=action.run_id,
+                        evidence={"status": "failure", "failed_job": "tests"},
+                        inspected=True,
+                        result_ready=True,
+                    ),
+                ),
             )
         raise TypeError(type(action).__name__)
-
-    def after_wait(
-        self, state: dict[str, Any], *, requested_seconds: int, wake_at: float
-    ) -> dict[str, Any]:
-        """Leave source state unchanged for this focused interface test."""
-        return state
-
-    def validate_wait(self, state: dict[str, Any]) -> str | None:
-        """Allow the generic test source to wait in any state."""
-        return None
-
-    def validate_alert(self, resource_ids: list[str], state: dict[str, Any]) -> str | None:
-        """Require a workflow run to be inspected before alerting."""
-        if not set(resource_ids).issubset(state.get("observed_run_ids", [])):
-            return "Workflow run has not been inspected."
-        return None
-
-    def record_alert(
-        self, resource_ids: list[str], state: dict[str, Any], *, delivered_at: float
-    ) -> dict[str, Any]:
-        """Record alert completion and return to workflow discovery."""
-        updated = deepcopy(state)
-        updated.update(phase="discovery", alerted_run_ids=resource_ids)
-        return updated
-
-    def should_continue_after_alert(self, state: dict[str, Any]) -> bool:
-        """End the test objective after its single failed run is reported."""
-        return False
-
-    def validate_finish(
-        self, state: dict[str, Any], *, tool_count: int, max_tool_calls: int
-    ) -> str | None:
-        """Permit bounded completion for the demonstration source."""
-        return None
-
-    def record_finish(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Return to workflow discovery after bounded completion."""
-        return {**state, "phase": "discovery"}
 
 
 class ScriptedGitHubAgent:
@@ -124,6 +92,14 @@ class ScriptedGitHubAgent:
                 AgentTurn(
                     rationale="Discover failed workflow runs.",
                     action=ListWorkflowRuns(repository="acme/widget"),
+                ),
+                AgentTurn(
+                    rationale="Monitor the discovered workflow run.",
+                    action=SelectObjective(
+                        kind="monitor",
+                        resource_ids=["4815"],
+                        summary="Investigate failed workflow runs.",
+                    ),
                 ),
                 AgentTurn(
                     rationale="Inspect the discovered failure.",
@@ -172,10 +148,11 @@ async def test_graph_runs_github_actions_tools_without_platform_changes() -> Non
 
     assert [entry["tool"] for entry in result.get("transcript", [])] == [
         "list_workflow_runs",
+        "select_objective",
         "get_workflow_run",
         "send_alert",
     ]
-    assert result.get("source_state", {}).get("alerted_run_ids") == ["4815"]
+    assert result.get("source_state", {}).get("completed_resource_ids") == ["4815"]
     assert sink.notifications[0].title == "GitHub Actions failure"
 
 

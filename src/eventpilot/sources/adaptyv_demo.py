@@ -15,7 +15,7 @@ from eventpilot.adapters.adaptyv.tools import (
     UpdateExperiment,
 )
 from eventpilot.core.agent_reasoning import AgentTurn, FinishCycle, SendAlert, Wait
-from eventpilot.sources.adaptyv import SelectObjective
+from eventpilot.core.monitoring import SelectObjective
 
 
 class DemoAdaptyvReasoningEngine:
@@ -35,7 +35,7 @@ class DemoAdaptyvReasoningEngine:
             active = [
                 item
                 for item in items
-                if item["id"] not in source_state.get("completed_experiment_ids", [])
+                if item["id"] not in source_state.get("completed_resource_ids", [])
                 if item["status"] != ExperimentStatus.CANCELED
             ]
             if not active:
@@ -49,20 +49,25 @@ class DemoAdaptyvReasoningEngine:
                 ),
                 action=SelectObjective(
                     kind="monitor",
-                    experiment_ids=[item["id"] for item in active],
+                    resource_ids=[item["id"] for item in active],
                     summary="Interleave monitoring across all active experiments.",
                 ),
             )
 
         if tool == "select_objective":
-            experiment_id = latest["result"]["experiment_ids"][0]
+            experiment_id = latest["result"]["resource_ids"][0]
             return AgentTurn(
                 rationale="Inspect the experiment selected for this cycle.",
                 action=GetExperiment(experiment_id=experiment_id),
             )
 
         if tool == "wait":
-            candidates = source_state.get("next_experiment_candidates", [])
+            if source_state.get("phase") == "discovery" and not source_state.get("objective"):
+                return AgentTurn(
+                    rationale="The idle backoff completed without new work.",
+                    action=FinishCycle(summary="No actionable experiments after idle backoff."),
+                )
+            candidates = source_state.get("next_resource_candidates", [])
             experiment_id = (
                 candidates[0] if candidates else self._last_focused_experiment_id(transcript)
             )
@@ -153,13 +158,13 @@ class DemoAdaptyvReasoningEngine:
             )
 
         if tool == "send_alert":
-            completed = set(source_state.get("completed_experiment_ids", []))
+            completed = set(source_state.get("completed_resource_ids", []))
             evidence = source_state.get("evidence", {})
             objective = source_state.get("objective") or {}
             next_ready = next(
                 (
                     experiment_id
-                    for experiment_id in objective.get("experiment_ids", [])
+                    for experiment_id in objective.get("resource_ids", [])
                     if experiment_id not in completed
                     and evidence.get(experiment_id, {}).get("status") == ExperimentStatus.DONE
                     and evidence.get(experiment_id, {}).get("results_status") in {"Partial", "All"}

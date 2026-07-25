@@ -9,6 +9,12 @@ import instructor
 from instructor import AsyncInstructor
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, create_model
 
+from eventpilot.core.monitoring import (
+    SelectObjective,
+    available_source_tools,
+    validate_finish,
+    validate_wait,
+)
 from eventpilot.core.notifications import NotificationPriority
 from eventpilot.prompts.loader import load_prompt
 from eventpilot.sources.base import DataSource, SourceToolCall
@@ -43,7 +49,12 @@ class FinishCycle(SourceToolCall):
     summary: str = Field(min_length=1, description="Completed work or yield reason.")
 
 
-CORE_TOOL_TYPES: tuple[type[SourceToolCall], ...] = (SendAlert, Wait, FinishCycle)
+CORE_TOOL_TYPES: tuple[type[SourceToolCall], ...] = (
+    SelectObjective,
+    SendAlert,
+    Wait,
+    FinishCycle,
+)
 
 
 class AgentTurn(BaseModel):
@@ -94,11 +105,7 @@ class InstructorAutonomousReasoningEngine:
         self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
     ) -> AgentTurn:
         """Ask the LLM to inspect source state and select one registered tool."""
-        finish_rejection = self._source.validate_finish(
-            source_state,
-            tool_count=len(transcript),
-            max_tool_calls=self._max_tool_calls_per_cycle,
-        )
+        finish_rejection = validate_finish(source_state)
         if len(transcript) >= self._max_tool_calls_per_cycle and finish_rejection is None:
             return AgentTurn(
                 rationale="The cycle reached its tool budget and must yield to a fresh cycle.",
@@ -159,23 +166,18 @@ def available_tool_types(
     max_tool_calls: int,
 ) -> tuple[type[SourceToolCall], ...]:
     """Return only tool schemas permitted by current deterministic graph policy."""
-    source_names = source.available_tools(source_state)
+    source_names = available_source_tools(source, source_state)
     tools = tuple(
         tool_type
         for tool_type in source.tool_types
         if tool_type.model_fields["tool"].default in source_names
     )
     core: tuple[type[SourceToolCall], ...] = (SendAlert,)
-    if source.validate_wait(source_state) is None:
+    if source_state.get("phase") == "objective":
+        core += (SelectObjective,)
+    if validate_wait(source_state) is None:
         core += (Wait,)
-    if (
-        source.validate_finish(
-            source_state,
-            tool_count=tool_count,
-            max_tool_calls=max_tool_calls,
-        )
-        is None
-    ):
+    if validate_finish(source_state) is None:
         core += (FinishCycle,)
     return (*tools, *core)
 
