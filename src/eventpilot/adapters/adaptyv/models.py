@@ -1,8 +1,8 @@
-"""Model the Adaptyv Foundry API exposed to the autonomous agent."""
+"""Model documented Adaptyv Foundry API responses."""
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -103,23 +103,3 @@ class ResultPage(BaseModel):
     total: int = Field(ge=0)
     count: int = Field(ge=0)
     offset: int = Field(ge=0)
-
-
-class FoundryClient(Protocol):
-    """Expose only documented Foundry operations available to the agent."""
-
-    async def list_experiments(self, *, limit: int = 50, offset: int = 0) -> ExperimentPage:
-        """List experiments visible to the authenticated organization."""
-        ...
-
-    async def get_experiment(self, experiment_id: str) -> FoundryExperiment:
-        """Fetch the current detailed representation of one experiment."""
-        ...
-
-    async def list_experiment_updates(self, experiment_id: str) -> UpdatePage:
-        """List chronological updates for one experiment."""
-        ...
-
-    async def list_experiment_results(self, experiment_id: str) -> ResultPage:
-        """List available analysis results for one experiment."""
-        ...

@@ -6,27 +6,30 @@ from time import monotonic, time
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+from eventpilot.adapters.adaptyv.mock import MockFoundryClient
 from eventpilot.config import Settings, get_settings
 from eventpilot.core.agent_reasoning import (
     AutonomousReasoningEngine,
-    DemoAutonomousReasoningEngine,
     InstructorAutonomousReasoningEngine,
 )
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
+from eventpilot.core.clock import AcceleratedClock
 from eventpilot.notifications.console import ConsoleNotificationSink
-from eventpilot.simulator import AcceleratedClock, MockFoundryClient
+from eventpilot.sources.adaptyv import AdaptyvDataSource, DemoAdaptyvReasoningEngine
+from eventpilot.sources.base import DataSource
 
 
 def _build_reasoning_engine(
-    settings: Settings, *, max_tool_calls_per_cycle: int = 32
+    settings: Settings, source: DataSource, *, max_tool_calls_per_cycle: int = 32
 ) -> AutonomousReasoningEngine:
     """Create either the configured LLM agent or the explicit offline test double."""
     if settings.mock_llm:
-        return DemoAutonomousReasoningEngine()
+        return DemoAdaptyvReasoningEngine()
     if not settings.instructor_model:
         raise RuntimeError("Configure LLM_PROVIDER and LLM_MODEL or set EVENTPILOT_MOCK_LLM=true")
     return InstructorAutonomousReasoningEngine(
         settings.instructor_model,
+        source,
         api_key=(settings.llm_api_key.get_secret_value() if settings.llm_api_key else None),
         api_base=settings.llm_api_base,
         max_tool_calls_per_cycle=max_tool_calls_per_cycle,
@@ -38,15 +41,18 @@ async def run_agent(*, max_cycles: int | None = None) -> None:
     settings = get_settings()
     settings.database_path.parent.mkdir(parents=True, exist_ok=True)
     max_tool_calls_per_cycle = 12 if max_cycles is not None else 32
-    agent = _build_reasoning_engine(settings, max_tool_calls_per_cycle=max_tool_calls_per_cycle)
     accelerated_clock = (
         AcceleratedClock(settings.time_acceleration) if settings.time_acceleration > 1 else None
     )
     foundry = MockFoundryClient.from_fixture(clock=accelerated_clock or monotonic)
+    source = AdaptyvDataSource(foundry)
+    agent = _build_reasoning_engine(
+        settings, source, max_tool_calls_per_cycle=max_tool_calls_per_cycle
+    )
     async with AsyncSqliteSaver.from_conn_string(str(settings.database_path)) as checkpointer:
         graph = build_autonomous_graph(
             agent,
-            foundry,
+            source,
             ConsoleNotificationSink(),
             destination=settings.notification_destination,
             checkpointer=checkpointer,
