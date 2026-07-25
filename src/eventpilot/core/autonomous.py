@@ -34,6 +34,7 @@ class AutonomousAgentState(TypedDict, total=False):
     cycle_summary: str | None
     cycle_count: int
     tool_count: int
+    completed_experiment_ids: list[str]
 
 
 Sleep = Callable[[float], Awaitable[None]]
@@ -53,7 +54,9 @@ def build_autonomous_graph(
 
     async def reason(state: AutonomousAgentState) -> AutonomousAgentState:
         """Let the LLM inspect prior tool results and select its next tool call."""
-        turn = await agent.decide(state.get("transcript", []))
+        turn = await agent.decide(
+            state.get("transcript", []), state.get("completed_experiment_ids", [])
+        )
         print(f"[agent] {turn.action.tool}: {turn.rationale}")
         return {"turn": turn.model_dump(mode="json"), "outcome": "tool_selected"}
 
@@ -65,7 +68,13 @@ def build_autonomous_graph(
         """Execute the documented Foundry experiment-discovery operation."""
         action = _expect_action(state, ListExperiments)
         page = await foundry.list_experiments(limit=action.limit, offset=action.offset)
-        return _tool_result(state, action, page.model_dump(mode="json"))
+        completed = set(state.get("completed_experiment_ids", []))
+        actionable = [item for item in page.items if item.id not in completed]
+        removed_count = len(page.items) - len(actionable)
+        result = page.model_dump(mode="json")
+        result.update(items=[item.model_dump(mode="json") for item in actionable])
+        result.update(count=len(actionable), total=max(0, page.total - removed_count))
+        return _tool_result(state, action, result)
 
     async def get_experiment(state: AutonomousAgentState) -> AutonomousAgentState:
         """Execute the documented Foundry experiment-detail operation."""
@@ -88,11 +97,28 @@ def build_autonomous_graph(
     async def send_update(state: AutonomousAgentState) -> AutonomousAgentState:
         """Execute the trusted operator-update action requested by the agent."""
         action = _expect_action(state, SendUpdate)
+        completed = state.get("completed_experiment_ids", [])
+        if set(action.experiment_ids).issubset(completed):
+            return _tool_result(
+                state,
+                action,
+                {"status": "skipped", "reason": "experiment results already delivered"},
+            )
         receipt = await sink.send(
             destination,
             Notification(title=action.title, body=action.body, priority=action.priority),
         )
-        return _tool_result(state, action, receipt.model_dump(mode="json"))
+        update = _tool_result(state, action, receipt.model_dump(mode="json"))
+        evidenced_completions = [
+            experiment_id
+            for experiment_id in action.experiment_ids
+            if _has_completion_evidence_for(state.get("transcript", []), experiment_id)
+        ]
+        if evidenced_completions:
+            update["completed_experiment_ids"] = list(
+                dict.fromkeys([*completed, *evidenced_completions])
+            )
+        return update
 
     async def wait(state: AutonomousAgentState) -> AutonomousAgentState:
         """Execute the agent-controlled pause and return completion to the agent."""
@@ -170,6 +196,24 @@ def _tool_result(
         "tool_count": state.get("tool_count", 0) + 1,
         "outcome": f"{action.tool}_completed",
     }
+
+
+def _has_completion_evidence_for(transcript: list[dict[str, Any]], experiment_id: str) -> bool:
+    """Return whether tool evidence proves results are available for the experiment."""
+    return any(
+        (
+            entry["tool"] == "list_experiment_results"
+            and entry["call"]["experiment_id"] == experiment_id
+            and entry["result"]["count"] > 0
+        )
+        or (
+            entry["tool"] == "get_experiment"
+            and entry["result"]["id"] == experiment_id
+            and entry["result"]["status"] == "Done"
+            and entry["result"]["results_status"] in {"Partial", "All"}
+        )
+        for entry in transcript
+    )
 
 
 class AgentRuntime:

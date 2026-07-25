@@ -45,6 +45,7 @@ class SendUpdate(BaseModel):
     """Send an operator update through the configured trusted destination."""
 
     tool: Literal["send_update"] = "send_update"
+    experiment_ids: list[str] = Field(min_length=1)
     title: str = Field(min_length=1)
     body: str = Field(min_length=1)
     priority: NotificationPriority = NotificationPriority.NORMAL
@@ -89,7 +90,9 @@ class AgentTurn(BaseModel):
 class AutonomousReasoningEngine(Protocol):
     """Choose the next tool from the autonomous agent's accumulated context."""
 
-    async def decide(self, transcript: list[dict[str, Any]]) -> AgentTurn:
+    async def decide(
+        self, transcript: list[dict[str, Any]], completed_experiment_ids: list[str]
+    ) -> AgentTurn:
         """Return one validated tool call without executing it."""
         ...
 
@@ -117,7 +120,9 @@ class InstructorAutonomousReasoningEngine:
         )
         self._max_tool_calls_per_cycle = max_tool_calls_per_cycle
 
-    async def decide(self, transcript: list[dict[str, Any]]) -> AgentTurn:
+    async def decide(
+        self, transcript: list[dict[str, Any]], completed_experiment_ids: list[str]
+    ) -> AgentTurn:
         """Ask the LLM to inspect tool results and select exactly one next tool."""
         if len(transcript) >= self._max_tool_calls_per_cycle:
             return AgentTurn(
@@ -136,6 +141,7 @@ class InstructorAutonomousReasoningEngine:
                         {
                             "remaining_tool_calls": self._max_tool_calls_per_cycle
                             - len(transcript),
+                            "completed_experiment_ids": completed_experiment_ids,
                             "tool_transcript": transcript,
                         }
                     ),
@@ -148,7 +154,9 @@ class InstructorAutonomousReasoningEngine:
 class DemoAutonomousReasoningEngine:
     """Exercise the complete tool loop deterministically without LLM credentials."""
 
-    async def decide(self, transcript: list[dict[str, Any]]) -> AgentTurn:
+    async def decide(
+        self, transcript: list[dict[str, Any]], completed_experiment_ids: list[str]
+    ) -> AgentTurn:
         """Choose representative discovery, inspection, wait, update, and finish calls."""
         if not transcript:
             return _list_experiments_turn()
@@ -160,21 +168,25 @@ class DemoAutonomousReasoningEngine:
             active = [
                 item
                 for item in items
-                if item["status"] not in {ExperimentStatus.DONE, ExperimentStatus.CANCELED}
+                if item["id"] not in completed_experiment_ids
+                if item["status"] != ExperimentStatus.CANCELED
             ]
             if not active:
                 return AgentTurn(
                     rationale="No active experiment currently requires attention.",
                     action=Wait(seconds=60, reason="Back off before discovering work again."),
                 )
-            experiment_id = active[0]["id"]
+            experiment_id = next(
+                (item["id"] for item in active if item["status"] != ExperimentStatus.DONE),
+                active[0]["id"],
+            )
             return AgentTurn(
                 rationale="Inspect the newest active experiment before deciding what to do.",
                 action=GetExperiment(experiment_id=experiment_id),
             )
 
         if tool == "wait":
-            experiment_id = _last_active_experiment_id(transcript)
+            experiment_id = _last_focused_experiment_id(transcript)
             if experiment_id:
                 return AgentTurn(
                     rationale=(
@@ -224,6 +236,7 @@ class DemoAutonomousReasoningEngine:
             return AgentTurn(
                 rationale="The result payload confirms that operator-ready data is available.",
                 action=SendUpdate(
+                    experiment_ids=[call["experiment_id"]],
                     title=f"Experiment {call['experiment_id']} results are ready",
                     body=f"Foundry returned {result_page['count']} available result(s).",
                 ),
@@ -249,12 +262,9 @@ def _list_experiments_turn() -> AgentTurn:
     )
 
 
-def _last_active_experiment_id(transcript: list[dict[str, Any]]) -> str | None:
-    """Recover the most recent nonterminal experiment selected by the offline agent."""
+def _last_focused_experiment_id(transcript: list[dict[str, Any]]) -> str | None:
+    """Recover the experiment most recently inspected by the offline agent."""
     for entry in reversed(transcript):
-        if entry["tool"] != "get_experiment":
-            continue
-        experiment = entry["result"]
-        if experiment["status"] not in {ExperimentStatus.DONE, ExperimentStatus.CANCELED}:
-            return str(experiment["id"])
+        if entry["tool"] == "get_experiment":
+            return str(entry["result"]["id"])
     return None
