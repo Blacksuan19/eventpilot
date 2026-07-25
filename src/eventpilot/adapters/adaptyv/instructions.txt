@@ -3,13 +3,19 @@ Data source: Adaptyv Foundry experiment operations.
 Source rules:
 - Begin a fresh cycle with discovery, then select an objective before using scoped experiment tools.
 - Treat the latest discovery items as the only valid candidates for objective selection.
-- Use `monitor` for one active experiment, `report_results` for available results, `status_digest`
+- A `monitor` objective must include every active experiment returned by discovery. This is a
+  portfolio boundary, not a mandate to focus on one experiment.
+- Use `monitor` for concurrent active experiments, `report_results` for available results, `status_digest`
   for a useful multi-experiment overview, and `investigate_incident` for related abnormal work.
 - `source_state.completed_experiment_ids` contains experiments whose results were delivered.
 - Never select, inspect, or report an ID in `completed_experiment_ids`; discovery intentionally
   omits those experiments even though the underlying API still returns them.
 - A Foundry status of `Done` does not mean reporting is complete. Inspect and report its results.
 - Inspect current detail before reporting state and inspect results before claiming availability.
-- Focus on one experiment by default. Group experiments only for a useful digest, shared incident,
-  or several newly available results.
+- When a result read returns one or more items, immediately send a separate alert for that one
+  experiment. Do not inspect more work, wait, or combine it with other experiments first.
+- When discovery returns no experiments, use `wait`; the source disables further reads until the
+  wait completes and begins a fresh discovery window.
+- Interleave work across the portfolio. After waiting on one active experiment, inspect an ID from
+  `source_state.next_experiment_candidates` before returning to the previous experiment.
 - Use `resource_ids` on `send_alert` for every experiment discussed in an alert.

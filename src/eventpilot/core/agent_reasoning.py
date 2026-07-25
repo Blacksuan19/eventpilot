@@ -1,7 +1,9 @@
 """Define generic agent tools and provider-neutral structured reasoning."""
 
 import json
-from typing import Annotated, Any, Literal, Protocol, Union, cast
+from functools import reduce
+from operator import or_
+from typing import Annotated, Any, Literal, Protocol, cast
 
 import instructor
 from instructor import AsyncInstructor
@@ -87,27 +89,38 @@ class InstructorAutonomousReasoningEngine:
         )
         self._source = source
         self._max_tool_calls_per_cycle = max_tool_calls_per_cycle
-        action_union = Union[(*source.tool_types, *CORE_TOOL_TYPES)]
-        action_type = Annotated[action_union, Field(discriminator="tool")]
-        self._response_model = create_model(
-            f"{source.name.title().replace('-', '')}AgentTurn",
-            rationale=(str, Field(min_length=1)),
-            action=(action_type, ...),
-        )
 
     async def decide(
         self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
     ) -> AgentTurn:
         """Ask the LLM to inspect source state and select one registered tool."""
-        if len(transcript) >= self._max_tool_calls_per_cycle:
+        finish_rejection = self._source.validate_finish(
+            source_state,
+            tool_count=len(transcript),
+            max_tool_calls=self._max_tool_calls_per_cycle,
+        )
+        if len(transcript) >= self._max_tool_calls_per_cycle and finish_rejection is None:
             return AgentTurn(
                 rationale="The cycle reached its tool budget and must yield to a fresh cycle.",
                 action=FinishCycle(
                     summary="Cycle tool budget reached; resume from fresh source evidence."
                 ),
             )
+        available_types = available_tool_types(
+            self._source,
+            source_state,
+            tool_count=len(transcript),
+            max_tool_calls=self._max_tool_calls_per_cycle,
+        )
+        action_union = reduce(or_, available_types)
+        action_type = Annotated[action_union, Field(discriminator="tool")]
+        response_model = create_model(
+            f"{self._source.name.title().replace('-', '')}AvailableAgentTurn",
+            rationale=(str, Field(min_length=1)),
+            action=(action_type, ...),
+        )
         response: Any = await self._client.create(
-            response_model=self._response_model,
+            response_model=response_model,
             messages=[
                 {
                     "role": "system",
@@ -121,17 +134,10 @@ class InstructorAutonomousReasoningEngine:
                         {
                             "data_source": self._source.name,
                             "currently_available_tools": sorted(
-                                {
-                                    *self._source.available_tools(source_state),
-                                    *(
-                                        tool_type.model_fields["tool"].default
-                                        for tool_type in CORE_TOOL_TYPES
-                                    ),
-                                }
+                                tool_type.model_fields["tool"].default
+                                for tool_type in available_types
                             ),
-                            "tool_catalog": build_tool_catalog(
-                                (*self._source.tool_types, *CORE_TOOL_TYPES)
-                            ),
+                            "tool_catalog": build_tool_catalog(available_types),
                             "remaining_tool_calls": self._max_tool_calls_per_cycle
                             - len(transcript),
                             "source_state": source_state,
@@ -143,6 +149,35 @@ class InstructorAutonomousReasoningEngine:
             max_retries=2,
         )
         return AgentTurn(rationale=response.rationale, action=response.action)
+
+
+def available_tool_types(
+    source: DataSource,
+    source_state: dict[str, Any],
+    *,
+    tool_count: int,
+    max_tool_calls: int,
+) -> tuple[type[SourceToolCall], ...]:
+    """Return only tool schemas permitted by current deterministic graph policy."""
+    source_names = source.available_tools(source_state)
+    tools = tuple(
+        tool_type
+        for tool_type in source.tool_types
+        if tool_type.model_fields["tool"].default in source_names
+    )
+    core: tuple[type[SourceToolCall], ...] = (SendAlert,)
+    if source.validate_wait(source_state) is None:
+        core += (Wait,)
+    if (
+        source.validate_finish(
+            source_state,
+            tool_count=tool_count,
+            max_tool_calls=max_tool_calls,
+        )
+        is None
+    ):
+        core += (FinishCycle,)
+    return (*tools, *core)
 
 
 def build_tool_catalog(

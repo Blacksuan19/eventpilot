@@ -28,6 +28,7 @@ from eventpilot.core.agent_reasoning import (
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
 from eventpilot.core.clock import AcceleratedClock
 from eventpilot.core.notifications import DeliveryResult, Notification
+from eventpilot.core.reporting import AgentDecisionEvent, AgentEvent, ToolResultEvent
 from eventpilot.sources.adaptyv import (
     AdaptyvDataSource,
     DemoAdaptyvReasoningEngine,
@@ -53,6 +54,18 @@ class RecordingSink:
         """Store one delivered update and return its synthetic receipt."""
         self.notifications.append(notification)
         return DeliveryResult(channel=self.channel_name, message_id=str(len(self.notifications)))
+
+
+class RecordingReporter:
+    """Capture structured runtime state reports for observability assertions."""
+
+    def __init__(self) -> None:
+        """Create an empty event stream."""
+        self.events: list[AgentEvent] = []
+
+    def emit(self, event: AgentEvent) -> None:
+        """Append one immutable runtime event."""
+        self.events.append(event)
 
 
 class ScriptedAgent:
@@ -89,14 +102,24 @@ class ManualClock:
         self.now += delay
 
 
-async def test_accelerated_clock_advances_logical_time_without_real_delay() -> None:
-    """Prove Docker acceleration advances the shared hidden clock by its multiplier."""
-    clock = AcceleratedClock(3_600)
+async def test_accelerated_clock_advances_time_with_bounded_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Advance the hidden clock while retaining a real idle-backoff ceiling."""
+    physical_sleeps: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        """Capture the requested physical delay without slowing the unit test."""
+        physical_sleeps.append(seconds)
+
+    monkeypatch.setattr("eventpilot.core.clock.asyncio.sleep", record_sleep)
+    clock = AcceleratedClock(3_600, max_physical_wait_seconds=5)
     started_at = clock()
 
-    await clock.sleep(2)
+    await clock.sleep(60)
 
-    assert clock() - started_at == 7_200
+    assert clock() - started_at == 216_000
+    assert physical_sleeps == [5]
 
 
 def scenario_with_lifecycle(
@@ -147,12 +170,14 @@ async def test_agent_discovers_polls_results_and_finishes_cycle() -> None:
         ]
     )
     sink = RecordingSink()
+    reporter = RecordingReporter()
     graph = build_autonomous_graph(
         DemoAdaptyvReasoningEngine(),
         AdaptyvDataSource(foundry),
         sink,
         sleep=clock.sleep,
         clock=clock,
+        reporter=reporter,
     )
 
     result = await AgentRuntime(graph).run(max_cycles=1)
@@ -175,6 +200,26 @@ async def test_agent_discovers_polls_results_and_finishes_cycle() -> None:
     assert len(sink.notifications) == 1
     assert "results are ready" in sink.notifications[0].title
     assert clock.waits == [1, 1]
+    wait_events = [
+        event
+        for event in reporter.events
+        if isinstance(event, ToolResultEvent) and event.tool == "wait"
+    ]
+    assert [event.requested_wait_seconds for event in wait_events] == [1, 1]
+    assert [event.elapsed_wait_seconds for event in wait_events] == [1, 1]
+    assert all(event.action_model == "Wait" for event in wait_events)
+    assert wait_events[-1].source_state["objective_waited"] is True
+    first_decision = next(
+        event for event in reporter.events if isinstance(event, AgentDecisionEvent)
+    )
+    assert first_decision.action_model == "ListExperiments"
+    assert first_decision.arguments == {"limit": 50, "offset": 0}
+    assert first_decision.available_tools == [
+        "finish_cycle",
+        "list_experiments",
+        "send_alert",
+        "wait",
+    ]
 
 
 async def test_budget_yield_can_finish_after_discovery() -> None:
@@ -301,10 +346,11 @@ async def test_idle_agent_waits_without_sending_an_update() -> None:
     assert tool_names(result.get("transcript", [])) == ["list_experiments", "wait"]
     assert result.get("cycle_summary") == "Idle."
     assert sink.notifications == []
+    assert clock.waits == [60]
 
 
-async def test_agent_selects_active_experiment_from_mixed_discovery_results() -> None:
-    """Prove discovery ignores completed work when an active experiment is available."""
+async def test_agent_selects_the_discovered_experiment_portfolio() -> None:
+    """Keep unreported completed work alongside active work in the portfolio."""
     agent = DemoAdaptyvReasoningEngine()
     turn = await agent.decide(
         [
@@ -326,7 +372,7 @@ async def test_agent_selects_active_experiment_from_mixed_discovery_results() ->
     )
 
     assert isinstance(turn.action, SelectObjective)
-    assert turn.action.experiment_ids == ["active"]
+    assert turn.action.experiment_ids == ["complete", "active"]
 
 
 async def test_supervisor_completes_two_experiments_across_fresh_cycles() -> None:
@@ -352,17 +398,15 @@ async def test_supervisor_completes_two_experiments_across_fresh_cycles() -> Non
 
     result = await AgentRuntime(graph).run(max_cycles=2)
 
-    assert foundry.inspected_ids == [
-        experiment_ids[0],
-        experiment_ids[0],
-        experiment_ids[1],
-    ]
+    assert foundry.inspected_ids == [experiment_ids[0], experiment_ids[1], experiment_ids[0]]
     assert [notification.title for notification in sink.notifications] == [
-        f"Experiment {experiment_ids[0]} results are ready",
         f"Experiment {experiment_ids[1]} results are ready",
+        f"Experiment {experiment_ids[0]} results are ready",
     ]
     assert result.get("cycle_count") == 2
-    assert result.get("source_state", {}).get("completed_experiment_ids") == experiment_ids
+    assert result.get("source_state", {}).get("completed_experiment_ids") == list(
+        reversed(experiment_ids)
+    )
 
 
 async def test_result_delivery_is_idempotent_across_fresh_cycles() -> None:
@@ -413,8 +457,8 @@ async def test_result_delivery_is_idempotent_across_fresh_cycles() -> None:
     assert tool_names(result.get("transcript", [])) == ["list_experiments", "wait"]
 
 
-async def test_combined_update_records_every_completed_experiment() -> None:
-    """Prove one multi-experiment update atomically records every evidenced completion."""
+async def test_result_alerts_cannot_group_experiments() -> None:
+    """Require independently evidenced results to be reported one experiment at a time."""
     scenarios = [
         scenario_with_lifecycle([ExperimentStatus.DONE], fixture_index=0),
         scenario_with_lifecycle([ExperimentStatus.DONE], fixture_index=1),
@@ -440,11 +484,27 @@ async def test_combined_update_records_every_completed_experiment() -> None:
                 action=GetExperiment(experiment_id=experiment_ids[1]),
             ),
             AgentTurn(
-                rationale="Report both.",
+                rationale="Incorrectly group both.",
                 action=SendAlert(
                     resource_ids=experiment_ids,
                     title="Both results are ready",
                     body="Both experiments completed.",
+                ),
+            ),
+            AgentTurn(
+                rationale="Report the first result separately.",
+                action=SendAlert(
+                    resource_ids=[experiment_ids[0]],
+                    title="First result is ready",
+                    body="The first experiment completed.",
+                ),
+            ),
+            AgentTurn(
+                rationale="Report the remaining result separately.",
+                action=SendAlert(
+                    resource_ids=[experiment_ids[1]],
+                    title="Second result is ready",
+                    body="The second experiment completed.",
                 ),
             ),
         ]
@@ -457,12 +517,66 @@ async def test_combined_update_records_every_completed_experiment() -> None:
 
     result = await AgentRuntime(graph).run(max_cycles=1)
 
-    assert len(sink.notifications) == 1
+    grouped = result.get("transcript", [])[4]
+    assert grouped["result"]["status"] == "rejected"
+    assert "separate" in grouped["result"]["reason"]
+    assert len(sink.notifications) == 2
     assert result.get("source_state", {}).get("completed_experiment_ids") == experiment_ids
 
 
-async def test_graph_rejects_experiment_calls_outside_objective_scope() -> None:
-    """Prove an LLM cannot inspect an experiment outside its committed objective."""
+async def test_ready_result_blocks_wait_and_finish_until_reported() -> None:
+    """Make an inspected result an immediate single-resource reporting obligation."""
+    scenario = scenario_with_lifecycle([ExperimentStatus.DONE])
+    experiment_id = scenario.experiment.id
+    agent = ScriptedAgent(
+        [
+            AgentTurn(rationale="Discover.", action=ListExperiments()),
+            AgentTurn(
+                rationale="Monitor discovered work.",
+                action=SelectObjective(
+                    kind="monitor",
+                    experiment_ids=[experiment_id],
+                    summary="Monitor the experiment.",
+                ),
+            ),
+            AgentTurn(rationale="Inspect.", action=GetExperiment(experiment_id=experiment_id)),
+            AgentTurn(
+                rationale="Read results.",
+                action=ListExperimentResults(experiment_id=experiment_id),
+            ),
+            AgentTurn(rationale="Incorrectly delay.", action=Wait(seconds=10, reason="Later.")),
+            AgentTurn(
+                rationale="Incorrectly finish.",
+                action=FinishCycle(summary="Leave the result pending."),
+            ),
+            AgentTurn(
+                rationale="Report immediately.",
+                action=SendAlert(
+                    resource_ids=[experiment_id],
+                    title="Result ready",
+                    body="The experiment result is ready.",
+                ),
+            ),
+        ]
+    )
+    foundry, clock = timed_foundry([scenario])
+    sink = RecordingSink()
+    graph = build_autonomous_graph(
+        agent, AdaptyvDataSource(foundry), sink, sleep=clock.sleep, clock=clock
+    )
+
+    result = await AgentRuntime(graph).run(max_cycles=1)
+
+    transcript = result.get("transcript", [])
+    assert transcript[4]["result"]["status"] == "rejected"
+    assert "reported before waiting" in transcript[4]["result"]["reason"]
+    assert transcript[5]["result"]["status"] == "rejected"
+    assert clock.waits == []
+    assert len(sink.notifications) == 1
+
+
+async def test_graph_requires_a_complete_monitoring_portfolio() -> None:
+    """Reject a monitor scope that would strand another discovered experiment."""
     scenarios = [
         scenario_with_lifecycle([ExperimentStatus.DONE], fixture_index=0),
         scenario_with_lifecycle([ExperimentStatus.DONE], fixture_index=1),
@@ -472,7 +586,7 @@ async def test_graph_rejects_experiment_calls_outside_objective_scope() -> None:
         [
             AgentTurn(rationale="Discover.", action=ListExperiments()),
             AgentTurn(
-                rationale="Monitor only the first experiment.",
+                rationale="Incorrectly focus on only the first experiment.",
                 action=SelectObjective(
                     kind="monitor",
                     experiment_ids=[experiment_ids[0]],
@@ -480,23 +594,39 @@ async def test_graph_rejects_experiment_calls_outside_objective_scope() -> None:
                 ),
             ),
             AgentTurn(
-                rationale="Try unrelated work.",
+                rationale="Correct the objective to cover concurrent work.",
+                action=SelectObjective(
+                    kind="monitor",
+                    experiment_ids=experiment_ids,
+                    summary="Monitor both experiments.",
+                ),
+            ),
+            AgentTurn(
+                rationale="Inspect the second experiment.",
                 action=GetExperiment(experiment_id=experiment_ids[1]),
             ),
             AgentTurn(
-                rationale="Return to scoped work.",
-                action=GetExperiment(experiment_id=experiment_ids[0]),
+                rationale="Inspect its results.",
+                action=ListExperimentResults(experiment_id=experiment_ids[1]),
             ),
             AgentTurn(
-                rationale="Read scoped results.",
+                rationale="Report its results.",
+                action=SendAlert(
+                    resource_ids=[experiment_ids[1]],
+                    title="Portfolio result",
+                    body="The second experiment is complete.",
+                ),
+            ),
+            AgentTurn(
+                rationale="Inspect the other ready result.",
                 action=ListExperimentResults(experiment_id=experiment_ids[0]),
             ),
             AgentTurn(
-                rationale="Report scoped results.",
+                rationale="Report the other ready result.",
                 action=SendAlert(
                     resource_ids=[experiment_ids[0]],
-                    title="Scoped result",
-                    body="The scoped result is ready.",
+                    title="Remaining portfolio result",
+                    body="The first experiment is also complete.",
                 ),
             ),
         ]
@@ -509,15 +639,31 @@ async def test_graph_rejects_experiment_calls_outside_objective_scope() -> None:
 
     result = await AgentRuntime(graph).run(max_cycles=1)
 
-    rejected = result.get("transcript", [])[2]
+    rejected = result.get("transcript", [])[1]
     assert rejected["result"]["status"] == "rejected"
-    assert "outside" in rejected["result"]["reason"]
-    assert foundry.inspected_ids == [experiment_ids[0]]
-    assert len(sink.notifications) == 1
+    assert "every active" in rejected["result"]["reason"]
+    assert foundry.inspected_ids == [experiment_ids[1]]
+    assert len(sink.notifications) == 2
 
 
-async def test_graph_rejects_multi_experiment_monitor_objective() -> None:
-    """Prove monitoring cannot silently expand into an unrelated experiment batch."""
+def test_legacy_single_experiment_objective_can_expand() -> None:
+    """Expose objective selection when persisted monitoring state omits discovered work."""
+    source = AdaptyvDataSource(MockFoundryClient(load_scenarios()))
+    state = source.initial_state()
+    state.update(
+        phase="active",
+        objective={"kind": "monitor", "experiment_ids": ["experiment-egfr"]},
+        evidence={
+            "experiment-egfr": {"status": "InQueue"},
+            "experiment-kras": {"status": "InProduction"},
+        },
+    )
+
+    assert "select_objective" in source.available_tools(state)
+
+
+async def test_graph_accepts_multi_experiment_monitor_objective() -> None:
+    """Prove concurrent experiments share one interleaved monitoring portfolio."""
     scenarios = [
         scenario_with_lifecycle([ExperimentStatus.DONE], fixture_index=0),
         scenario_with_lifecycle([ExperimentStatus.DONE], fixture_index=1),
@@ -532,14 +678,6 @@ async def test_graph_rejects_multi_experiment_monitor_objective() -> None:
                     kind="monitor",
                     experiment_ids=experiment_ids,
                     summary="Monitor everything.",
-                ),
-            ),
-            AgentTurn(
-                rationale="Use a valid result batch.",
-                action=SelectObjective(
-                    kind="report_results",
-                    experiment_ids=experiment_ids,
-                    summary="Report related ready results.",
                 ),
             ),
             AgentTurn(
@@ -558,6 +696,22 @@ async def test_graph_rejects_multi_experiment_monitor_objective() -> None:
                     body="Both results are ready.",
                 ),
             ),
+            AgentTurn(
+                rationale="Report one result.",
+                action=SendAlert(
+                    resource_ids=[experiment_ids[0]],
+                    title="First result",
+                    body="The first result is ready.",
+                ),
+            ),
+            AgentTurn(
+                rationale="Report the remaining result.",
+                action=SendAlert(
+                    resource_ids=[experiment_ids[1]],
+                    title="Second result",
+                    body="The second result is ready.",
+                ),
+            ),
         ]
     )
     sink = RecordingSink()
@@ -568,10 +722,9 @@ async def test_graph_rejects_multi_experiment_monitor_objective() -> None:
 
     result = await AgentRuntime(graph).run(max_cycles=1)
 
-    rejected = result.get("transcript", [])[1]
-    assert rejected["result"]["status"] == "rejected"
-    assert "exactly one" in rejected["result"]["reason"]
-    assert len(sink.notifications) == 1
+    objective = result.get("transcript", [])[1]
+    assert objective["result"]["experiment_ids"] == experiment_ids
+    assert len(sink.notifications) == 2
 
 
 async def test_active_monitor_requires_agent_selected_wait_before_reporting() -> None:

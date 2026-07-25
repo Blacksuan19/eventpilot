@@ -16,20 +16,20 @@ from eventpilot.adapters.adaptyv.tools import (
     ListExperiments,
     ListExperimentUpdates,
 )
-from eventpilot.core.agent_reasoning import AgentTurn, SendAlert, Wait
+from eventpilot.core.agent_reasoning import AgentTurn, FinishCycle, SendAlert, Wait
 from eventpilot.sources.base import SourceContext, SourceExecution, SourceToolCall
 
 ObjectiveKind = Literal["monitor", "report_results", "status_digest", "investigate_incident"]
 
 
 class SelectObjective(SourceToolCall):
-    """Commit the cycle to a validated experiment scope and objective type."""
+    """Commit the cycle to a validated experiment portfolio and objective type."""
 
     tool: Literal["select_objective"] = "select_objective"
     kind: ObjectiveKind = Field(description="Monitoring objective enforced for this cycle.")
     experiment_ids: list[str] = Field(
         min_length=1,
-        description="Discovered experiment identifiers included in the objective.",
+        description="Discovered experiment identifiers available for interleaved work.",
     )
     summary: str = Field(min_length=1, description="Purpose and scope of this objective.")
 
@@ -61,13 +61,19 @@ class AdaptyvDataSource:
             "objective": None,
             "objective_waited": False,
             "poll_interval_seconds": None,
+            "last_inspected_experiment_id": None,
+            "next_experiment_candidates": [],
+            "pending_result_alert_id": None,
         }
 
     def available_tools(self, state: dict[str, Any]) -> set[str]:
         """Expose only Foundry operations valid in the current objective phase."""
+        if state.get("pending_result_alert_id"):
+            return set()
         phase = state.get("phase", "discovery")
-        return {
+        tools = {
             "discovery": {"list_experiments"},
+            "idle": set(),
             "objective": {"select_objective"},
             "active": {
                 "get_experiment",
@@ -75,6 +81,13 @@ class AdaptyvDataSource:
                 "list_experiment_results",
             },
         }[phase]
+        if phase == "active" and self._objective_omits_discovered_work(state):
+            tools.add("select_objective")
+        return tools
+
+    def is_idle(self, state: dict[str, Any]) -> bool:
+        """Return whether discovery found no currently actionable experiments."""
+        return state.get("phase") == "idle"
 
     def parse_tool(self, payload: dict[str, Any]) -> SourceToolCall:
         """Validate a persisted Foundry tool call by its discriminator."""
@@ -125,7 +138,7 @@ class AdaptyvDataSource:
                 results_status=item["results_status"],
                 observed_at=now,
             )
-        state["phase"] = "objective" if actionable else "discovery"
+        state["phase"] = "objective" if actionable else "idle"
         return SourceExecution(result=result, state=state)
 
     def _select_objective(self, action: SelectObjective, context: SourceContext) -> SourceExecution:
@@ -148,8 +161,17 @@ class AdaptyvDataSource:
             rejection = "Objective experiment identifiers must be unique."
         elif not selected_ids.issubset(discovered_ids):
             rejection = "Objective contains an experiment absent from discovery."
-        elif action.kind == "monitor" and len(selected_ids) != 1:
-            rejection = "A monitor objective requires exactly one experiment."
+        elif action.kind == "monitor":
+            monitorable_ids = {
+                item["id"]
+                for item in (discovery["result"]["items"] if discovery else [])
+                if item["status"] != ExperimentStatus.CANCELED
+            }
+            if selected_ids != monitorable_ids:
+                rejection = (
+                    "A monitor objective must include every active discovered experiment so "
+                    "monitoring can be interleaved."
+                )
         elif action.kind == "status_digest" and len(selected_ids) < 2:
             rejection = "A status digest requires at least two experiments."
         if rejection:
@@ -160,6 +182,8 @@ class AdaptyvDataSource:
             phase="active",
             objective_waited=False,
             poll_interval_seconds=None,
+            last_inspected_experiment_id=None,
+            next_experiment_candidates=[],
         )
         return SourceExecution(result=objective, state=state)
 
@@ -182,6 +206,7 @@ class AdaptyvDataSource:
             last_checked_at=now,
             last_observed_status=result["status"],
         )
+        self._record_inspection(state, action.experiment_id)
         return SourceExecution(result=result, state=state)
 
     async def _list_experiment_updates(
@@ -197,6 +222,7 @@ class AdaptyvDataSource:
             update_count=result["count"],
             updates_observed_at=context.clock(),
         )
+        self._record_inspection(state, action.experiment_id)
         return SourceExecution(result=result, state=state)
 
     async def _list_experiment_results(
@@ -212,6 +238,9 @@ class AdaptyvDataSource:
             result_count=result["count"],
             results_observed_at=context.clock(),
         )
+        self._record_inspection(state, action.experiment_id)
+        if result["count"] > 0:
+            state["pending_result_alert_id"] = action.experiment_id
         return SourceExecution(result=result, state=state)
 
     def after_wait(
@@ -219,22 +248,43 @@ class AdaptyvDataSource:
     ) -> dict[str, Any]:
         """Schedule the active experiments for their next model-selected poll."""
         updated = deepcopy(state)
-        objective = updated.get("objective")
-        if objective:
+        was_idle = updated.get("phase") == "idle"
+        objective = updated.get("objective") or {}
+        last_inspected = updated.get("last_inspected_experiment_id")
+        if last_inspected:
             monitoring = updated.setdefault("monitoring", {})
-            for experiment_id in objective["experiment_ids"]:
-                monitoring.setdefault(experiment_id, {})["next_poll_at"] = wake_at
+            monitoring.setdefault(last_inspected, {})["next_poll_at"] = wake_at
+        completed = set(updated.get("completed_experiment_ids", []))
+        updated["next_experiment_candidates"] = [
+            experiment_id
+            for experiment_id in objective.get("experiment_ids", [])
+            if experiment_id != last_inspected and experiment_id not in completed
+        ]
         updated["objective_waited"] = True
         updated["poll_interval_seconds"] = requested_seconds
+        if was_idle:
+            updated["phase"] = "discovery"
         return updated
+
+    def validate_wait(self, state: dict[str, Any]) -> str | None:
+        """Prevent delaying an operator-ready result after it has been inspected."""
+        pending = state.get("pending_result_alert_id")
+        if pending:
+            return f"Result evidence for {pending} must be reported before waiting."
+        return None
 
     def validate_alert(self, resource_ids: list[str], state: dict[str, Any]) -> str | None:
         """Require scoped, current Foundry evidence before an operator alert."""
+        pending = state.get("pending_result_alert_id")
+        if pending and resource_ids != [pending]:
+            return f"Report the pending result for {pending} in its own alert."
         objective = state.get("objective") or {}
         if not set(resource_ids).issubset(set(objective.get("experiment_ids", []))):
             return "Experiment is outside objective scope."
         evidence = state.get("evidence", {})
         results_ready = self._results_ready(resource_ids, evidence)
+        if len(resource_ids) > 1 and any(results_ready.values()):
+            return "Report each experiment's results in a separate alert."
         if objective.get("kind") == "report_results" and not all(results_ready.values()):
             return "Result reports require evidence for every experiment."
         if (
@@ -258,7 +308,7 @@ class AdaptyvDataSource:
     def record_alert(
         self, resource_ids: list[str], state: dict[str, Any], *, delivered_at: float
     ) -> dict[str, Any]:
-        """Record delivered results and schedule later monitoring after an alert."""
+        """Record delivery while preserving the current portfolio objective."""
         updated = deepcopy(state)
         evidence = updated.get("evidence", {})
         ready = self._results_ready(resource_ids, evidence)
@@ -275,21 +325,39 @@ class AdaptyvDataSource:
                 record["last_reported_status"] = observed_status
             if next_interval is not None:
                 record["next_poll_at"] = delivered_at + next_interval
-        updated.update(
-            objective=None,
-            phase="discovery",
-            objective_waited=False,
-            poll_interval_seconds=None,
-        )
+        updated["pending_result_alert_id"] = None
+        if not self.should_continue_after_alert(updated):
+            updated.update(
+                objective=None,
+                phase="discovery",
+                objective_waited=False,
+                poll_interval_seconds=None,
+                last_inspected_experiment_id=None,
+                next_experiment_candidates=[],
+            )
         return updated
+
+    def should_continue_after_alert(self, state: dict[str, Any]) -> bool:
+        """Continue when another objective experiment already has ready results."""
+        objective = state.get("objective") or {}
+        completed = set(state.get("completed_experiment_ids", []))
+        evidence = state.get("evidence", {})
+        return any(
+            experiment_id not in completed
+            and evidence.get(experiment_id, {}).get("status") == ExperimentStatus.DONE
+            and evidence.get(experiment_id, {}).get("results_status") in {"Partial", "All"}
+            for experiment_id in objective.get("experiment_ids", [])
+        )
 
     def validate_finish(
         self, state: dict[str, Any], *, tool_count: int, max_tool_calls: int
     ) -> str | None:
         """Keep longitudinal monitoring active until delivery or a budget yield."""
-        objective = state.get("objective")
-        if objective and objective["kind"] == "monitor" and tool_count < max_tool_calls:
-            return "A monitor remains active until delivery or budget yield."
+        pending = state.get("pending_result_alert_id")
+        if pending:
+            return f"Result evidence for {pending} must be reported before finishing the cycle."
+        if state.get("phase") == "idle":
+            return "An idle source must wait before starting another discovery cycle."
         return None
 
     def record_finish(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -300,6 +368,9 @@ class AdaptyvDataSource:
             phase="discovery",
             objective_waited=False,
             poll_interval_seconds=None,
+            last_inspected_experiment_id=None,
+            next_experiment_candidates=[],
+            pending_result_alert_id=None,
         )
         return updated
 
@@ -313,7 +384,23 @@ class AdaptyvDataSource:
                 "status": "rejected",
                 "reason": "Experiment is outside objective scope.",
             }
+        candidates = state.get("next_experiment_candidates", [])
+        if candidates and experiment_id == state.get("last_inspected_experiment_id"):
+            return {
+                "status": "rejected",
+                "reason": (
+                    "Inspect another portfolio experiment before returning to this one. "
+                    f"Available candidates: {', '.join(candidates)}."
+                ),
+            }
         return None
+
+    @staticmethod
+    def _record_inspection(state: dict[str, Any], experiment_id: str) -> None:
+        """Record portfolio progress and clear a rotation gate after switching experiments."""
+        if experiment_id != state.get("last_inspected_experiment_id"):
+            state["next_experiment_candidates"] = []
+        state["last_inspected_experiment_id"] = experiment_id
 
     @staticmethod
     def _results_ready(
@@ -328,6 +415,21 @@ class AdaptyvDataSource:
             )
             for resource_id in resource_ids
         }
+
+    @staticmethod
+    def _objective_omits_discovered_work(state: dict[str, Any]) -> bool:
+        """Detect legacy or incomplete monitor scopes that need portfolio expansion."""
+        objective = state.get("objective") or {}
+        if objective.get("kind") != "monitor":
+            return False
+        completed = set(state.get("completed_experiment_ids", []))
+        discovered = {
+            experiment_id
+            for experiment_id, evidence in state.get("evidence", {}).items()
+            if experiment_id not in completed
+            and evidence.get("status") != ExperimentStatus.CANCELED
+        }
+        return not discovered.issubset(set(objective.get("experiment_ids", [])))
 
 
 class DemoAdaptyvReasoningEngine:
@@ -355,16 +457,14 @@ class DemoAdaptyvReasoningEngine:
                     rationale="No active experiment currently requires attention.",
                     action=Wait(seconds=60, reason="Back off before discovering work again."),
                 )
-            experiment_id = next(
-                (item["id"] for item in active if item["status"] != ExperimentStatus.DONE),
-                active[0]["id"],
-            )
             return AgentTurn(
-                rationale="Commit this cycle to one discovered experiment.",
+                rationale=(
+                    "Monitor the discovered experiment portfolio without blocking on one run."
+                ),
                 action=SelectObjective(
                     kind="monitor",
-                    experiment_ids=[experiment_id],
-                    summary=f"Monitor experiment {experiment_id} until it is actionable.",
+                    experiment_ids=[item["id"] for item in active],
+                    summary="Interleave monitoring across all active experiments.",
                 ),
             )
 
@@ -376,7 +476,10 @@ class DemoAdaptyvReasoningEngine:
             )
 
         if tool == "wait":
-            experiment_id = self._last_focused_experiment_id(transcript)
+            candidates = source_state.get("next_experiment_candidates", [])
+            experiment_id = (
+                candidates[0] if candidates else self._last_focused_experiment_id(transcript)
+            )
             if experiment_id:
                 return AgentTurn(
                     rationale="The polling interval elapsed; refresh the active experiment.",
@@ -418,6 +521,30 @@ class DemoAdaptyvReasoningEngine:
                     title=f"Experiment {experiment_id} results are ready",
                     body=f"Foundry returned {latest['result']['count']} available result(s).",
                 ),
+            )
+
+        if tool == "send_alert":
+            completed = set(source_state.get("completed_experiment_ids", []))
+            evidence = source_state.get("evidence", {})
+            objective = source_state.get("objective") or {}
+            next_ready = next(
+                (
+                    experiment_id
+                    for experiment_id in objective.get("experiment_ids", [])
+                    if experiment_id not in completed
+                    and evidence.get(experiment_id, {}).get("status") == ExperimentStatus.DONE
+                    and evidence.get(experiment_id, {}).get("results_status") in {"Partial", "All"}
+                ),
+                None,
+            )
+            if next_ready:
+                return AgentTurn(
+                    rationale="Another experiment has ready results in the current portfolio.",
+                    action=ListExperimentResults(experiment_id=next_ready),
+                )
+            return AgentTurn(
+                rationale="No other portfolio result is immediately reportable.",
+                action=FinishCycle(summary="Reported all currently ready results."),
             )
 
         return self._discovery_turn()

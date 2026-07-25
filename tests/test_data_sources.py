@@ -42,6 +42,10 @@ class GitHubActionsTestSource:
             return {"get_workflow_run"}
         return {"list_workflow_runs"}
 
+    def is_idle(self, state: dict[str, Any]) -> bool:
+        """Treat the compact GitHub fixture as continuously discoverable."""
+        return False
+
     def parse_tool(self, payload: dict[str, Any]) -> SourceToolCall:
         """Validate one of this source's two unrelated tool schemas."""
         if payload.get("tool") == "list_workflow_runs":
@@ -77,6 +81,10 @@ class GitHubActionsTestSource:
         """Leave source state unchanged for this focused interface test."""
         return state
 
+    def validate_wait(self, state: dict[str, Any]) -> str | None:
+        """Allow the generic test source to wait in any state."""
+        return None
+
     def validate_alert(self, resource_ids: list[str], state: dict[str, Any]) -> str | None:
         """Require a workflow run to be inspected before alerting."""
         if not set(resource_ids).issubset(state.get("observed_run_ids", [])):
@@ -90,6 +98,10 @@ class GitHubActionsTestSource:
         updated = deepcopy(state)
         updated.update(phase="discovery", alerted_run_ids=resource_ids)
         return updated
+
+    def should_continue_after_alert(self, state: dict[str, Any]) -> bool:
+        """End the test objective after its single failed run is reported."""
+        return False
 
     def validate_finish(
         self, state: dict[str, Any], *, tool_count: int, max_tool_calls: int

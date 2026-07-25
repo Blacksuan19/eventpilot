@@ -49,6 +49,10 @@ class DataSource(Protocol):
         """Return source tools allowed by the current deterministic state."""
         ...
 
+    def is_idle(self, state: dict[str, Any]) -> bool:
+        """Return whether no source work is currently running or actionable."""
+        ...
+
     def parse_tool(self, payload: dict[str, Any]) -> SourceToolCall:
         """Validate a persisted tool payload against the source's tool catalog."""
         ...
@@ -63,6 +67,10 @@ class DataSource(Protocol):
         """Update source scheduling state after the generic wait tool completes."""
         ...
 
+    def validate_wait(self, state: dict[str, Any]) -> str | None:
+        """Return a rejection reason when source state requires immediate action."""
+        ...
+
     def validate_alert(self, resource_ids: list[str], state: dict[str, Any]) -> str | None:
         """Return a rejection reason when an alert lacks source evidence or scope."""
         ...
@@ -71,6 +79,10 @@ class DataSource(Protocol):
         self, resource_ids: list[str], state: dict[str, Any], *, delivered_at: float
     ) -> dict[str, Any]:
         """Persist source-owned delivery and monitoring state after an alert succeeds."""
+        ...
+
+    def should_continue_after_alert(self, state: dict[str, Any]) -> bool:
+        """Return whether delivered work leaves useful work in the current objective."""
         ...
 
     def validate_finish(

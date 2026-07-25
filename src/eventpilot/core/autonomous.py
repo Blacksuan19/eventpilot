@@ -15,9 +15,17 @@ from eventpilot.core.agent_reasoning import (
     FinishCycle,
     SendAlert,
     Wait,
+    available_tool_types,
     parse_core_tool,
 )
 from eventpilot.core.notifications import Notification
+from eventpilot.core.reporting import (
+    AgentDecisionEvent,
+    AgentReporter,
+    ConsoleAgentReporter,
+    CycleFinishedEvent,
+    ToolResultEvent,
+)
 from eventpilot.notifications.base import NotificationSink
 from eventpilot.sources.base import DataSource, SourceContext, SourceToolCall
 
@@ -45,11 +53,14 @@ def build_autonomous_graph(
     destination: str = "local-console",
     checkpointer: BaseCheckpointSaver[Any] | None = None,
     sleep: Sleep = asyncio.sleep,
+    idle_sleep: Sleep | None = None,
     clock: Callable[[], float] = time,
     max_wait_seconds: int | None = None,
     max_tool_calls_per_cycle: int = 32,
+    reporter: AgentReporter | None = None,
 ) -> Any:
     """Build a generic supervisor around a registered monitoring data source."""
+    event_reporter = reporter or ConsoleAgentReporter()
 
     def source_state(state: AutonomousAgentState) -> dict[str, Any]:
         """Return persisted source state or the plugin's initial state."""
@@ -58,7 +69,27 @@ def build_autonomous_graph(
     async def reason(state: AutonomousAgentState) -> AutonomousAgentState:
         """Let the reasoning engine select one core or source-provided tool."""
         turn = await agent.decide(state.get("transcript", []), source_state(state))
-        print(f"[agent] {turn.action.tool_name}: {turn.rationale}")
+        event_reporter.emit(
+            AgentDecisionEvent(
+                data_source=source.name,
+                cycle_count=state.get("cycle_count", 0),
+                tool_count=state.get("tool_count", 0),
+                rationale=turn.rationale,
+                tool=turn.action.tool_name,
+                action_model=type(turn.action).__name__,
+                arguments=turn.action.model_dump(mode="json", exclude={"tool"}),
+                available_tools=sorted(
+                    tool_type.model_fields["tool"].default
+                    for tool_type in available_tool_types(
+                        source,
+                        source_state(state),
+                        tool_count=state.get("tool_count", 0),
+                        max_tool_calls=max_tool_calls_per_cycle,
+                    )
+                ),
+                source_state=source_state(state),
+            )
+        )
         return {"turn": turn.model_dump(mode="json"), "outcome": "tool_selected"}
 
     def route_tool(state: AutonomousAgentState) -> str:
@@ -86,37 +117,50 @@ def build_autonomous_graph(
         execution = await source.execute(action, context)
         update = _tool_result(state, action, execution.result)
         update["source_state"] = execution.state
+        report_tool_result(state, action, execution.result, update)
         return update
 
     async def send_alert(state: AutonomousAgentState) -> AutonomousAgentState:
-        """Deliver an alert after the source validates its resource evidence."""
+        """Deliver an alert and continue working within the current cycle."""
         action = _expect_action(state, source, SendAlert)
         current_source_state = source_state(state)
         rejection = source.validate_alert(action.resource_ids, current_source_state)
         if rejection:
-            return _rejected_tool_result(state, action, rejection)
+            update = _rejected_tool_result(state, action, rejection)
+            report_tool_result(state, action, update.get("transcript", [])[-1]["result"], update)
+            return update
         receipt = await sink.send(
             destination,
             Notification(title=action.title, body=action.body, priority=action.priority),
         )
         update = _tool_result(state, action, receipt.model_dump(mode="json"))
-        update.update(
-            source_state=source.record_alert(
-                action.resource_ids, current_source_state, delivered_at=clock()
-            ),
-            cycle_summary=f"Delivered alert for {', '.join(action.resource_ids)}.",
-            cycle_count=state.get("cycle_count", 0) + 1,
-            tool_count=0,
-            outcome="cycle_finished",
+        update["source_state"] = source.record_alert(
+            action.resource_ids, current_source_state, delivered_at=clock()
         )
+        if not source.should_continue_after_alert(update["source_state"]):
+            update.update(
+                cycle_summary=f"Delivered alert for {', '.join(action.resource_ids)}.",
+                cycle_count=state.get("cycle_count", 0) + 1,
+                tool_count=0,
+                outcome="cycle_finished",
+            )
+        report_tool_result(state, action, receipt.model_dump(mode="json"), update)
+        if update.get("outcome") == "cycle_finished":
+            report_cycle_finished(update, f"Delivered alert for {', '.join(action.resource_ids)}.")
         return update
 
     async def wait(state: AutonomousAgentState) -> AutonomousAgentState:
         """Pause for the model-selected interval and notify the source scheduler."""
         action = _expect_action(state, source, Wait)
+        rejection = source.validate_wait(source_state(state))
+        if rejection:
+            update = _rejected_tool_result(state, action, rejection)
+            report_tool_result(state, action, update.get("transcript", [])[-1]["result"], update)
+            return update
         elapsed_seconds = min(action.seconds, max_wait_seconds or action.seconds)
         wake_at = clock() + elapsed_seconds
-        await sleep(elapsed_seconds)
+        wait_sleep = idle_sleep if source.is_idle(source_state(state)) and idle_sleep else sleep
+        await wait_sleep(elapsed_seconds)
         update = _tool_result(
             state,
             action,
@@ -130,6 +174,14 @@ def build_autonomous_graph(
         update["source_state"] = source.after_wait(
             source_state(state), requested_seconds=action.seconds, wake_at=wake_at
         )
+        report_tool_result(
+            state,
+            action,
+            update.get("transcript", [])[-1]["result"],
+            update,
+            requested_wait_seconds=action.seconds,
+            elapsed_wait_seconds=elapsed_seconds,
+        )
         return update
 
     async def finish_cycle(state: AutonomousAgentState) -> AutonomousAgentState:
@@ -141,22 +193,67 @@ def build_autonomous_graph(
             max_tool_calls=max_tool_calls_per_cycle,
         )
         if rejection:
-            return _rejected_tool_result(state, action, rejection)
-        return {
+            update = _rejected_tool_result(state, action, rejection)
+            report_tool_result(state, action, update.get("transcript", [])[-1]["result"], update)
+            return update
+        update: AutonomousAgentState = {
             "cycle_summary": action.summary,
             "cycle_count": state.get("cycle_count", 0) + 1,
             "source_state": source.record_finish(source_state(state)),
             "tool_count": 0,
             "outcome": "cycle_finished",
         }
+        report_cycle_finished(update, action.summary)
+        return update
 
     async def reject_action(state: AutonomousAgentState) -> AutonomousAgentState:
         """Reject an unavailable plugin tool without executing side effects."""
         action = _turn(state, source).action
-        return _rejected_tool_result(
+        update = _rejected_tool_result(
             state,
             action,
             f"Tool {action.tool_name} is unavailable in the current {source.name} state.",
+        )
+        report_tool_result(state, action, update.get("transcript", [])[-1]["result"], update)
+        return update
+
+    def report_tool_result(
+        previous: AutonomousAgentState,
+        action: SourceToolCall,
+        result: dict[str, Any],
+        update: AutonomousAgentState,
+        *,
+        requested_wait_seconds: int | None = None,
+        elapsed_wait_seconds: float | None = None,
+    ) -> None:
+        """Emit one tool execution with its arguments, result, and next source state."""
+        event_reporter.emit(
+            ToolResultEvent(
+                data_source=source.name,
+                cycle_count=update.get("cycle_count", previous.get("cycle_count", 0)),
+                tool_count=update.get("tool_count", previous.get("tool_count", 0)),
+                tool=action.tool_name,
+                action_model=type(action).__name__,
+                arguments=action.model_dump(mode="json", exclude={"tool"}),
+                result=result,
+                outcome=update.get("outcome", "unknown"),
+                source_state=update.get("source_state", source_state(previous)),
+                requested_wait_seconds=requested_wait_seconds,
+                elapsed_wait_seconds=elapsed_wait_seconds,
+            )
+        )
+
+    def report_cycle_finished(state: AutonomousAgentState, summary: str) -> None:
+        """Emit the durable state returned at the end of a finite cycle."""
+        event_reporter.emit(
+            CycleFinishedEvent(
+                data_source=source.name,
+                cycle_count=state.get("cycle_count", 0),
+                tool_count=state.get("tool_count", 0),
+                summary=summary,
+                outcome=state.get("outcome", "cycle_finished"),
+                source_state=source_state(state),
+            )
         )
 
     builder = StateGraph(AutonomousAgentState)
@@ -181,12 +278,16 @@ def build_autonomous_graph(
     builder.add_edge("source_tool", "agent")
     builder.add_edge("wait", "agent")
     builder.add_edge("reject_action", "agent")
-    for node in ("send_alert", "finish_cycle"):
-        builder.add_conditional_edges(
-            node,
-            lambda state: "end" if state.get("outcome") == "cycle_finished" else "agent",
-            {"end": END, "agent": "agent"},
-        )
+    builder.add_conditional_edges(
+        "send_alert",
+        lambda state: "end" if state.get("outcome") == "cycle_finished" else "agent",
+        {"end": END, "agent": "agent"},
+    )
+    builder.add_conditional_edges(
+        "finish_cycle",
+        lambda state: "end" if state.get("outcome") == "cycle_finished" else "agent",
+        {"end": END, "agent": "agent"},
+    )
     return builder.compile(checkpointer=checkpointer or InMemorySaver())
 
 
