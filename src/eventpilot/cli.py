@@ -36,9 +36,8 @@ async def run_agent(*, max_cycles: int | None = None) -> None:
     """Run the autonomous supervisor continuously or for a bounded local demonstration."""
     settings = get_settings()
     settings.database_path.parent.mkdir(parents=True, exist_ok=True)
-    agent = _build_reasoning_engine(
-        settings, max_tool_calls_per_cycle=12 if max_cycles is not None else 32
-    )
+    max_tool_calls_per_cycle = 12 if max_cycles is not None else 32
+    agent = _build_reasoning_engine(settings, max_tool_calls_per_cycle=max_tool_calls_per_cycle)
     foundry = MockFoundryClient.from_fixture()
     async with AsyncSqliteSaver.from_conn_string(str(settings.database_path)) as checkpointer:
         graph = build_autonomous_graph(
@@ -48,6 +47,7 @@ async def run_agent(*, max_cycles: int | None = None) -> None:
             destination=settings.notification_destination,
             checkpointer=checkpointer,
             max_wait_seconds=2 if max_cycles is not None else None,
+            max_tool_calls_per_cycle=max_tool_calls_per_cycle,
         )
         runtime = AgentRuntime(graph)
         print("EventPilot autonomous supervisor started")

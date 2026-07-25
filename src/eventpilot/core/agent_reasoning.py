@@ -11,6 +11,8 @@ from eventpilot.adapters.adaptyv import ExperimentStatus
 from eventpilot.core.notifications import NotificationPriority
 from eventpilot.prompts.loader import load_prompt
 
+ObjectiveKind = Literal["monitor", "report_results", "status_digest", "investigate_incident"]
+
 
 class ListExperiments(BaseModel):
     """Discover experiments accessible to the Foundry organization."""
@@ -25,6 +27,15 @@ class GetExperiment(BaseModel):
 
     tool: Literal["get_experiment"] = "get_experiment"
     experiment_id: str = Field(min_length=1)
+
+
+class SelectObjective(BaseModel):
+    """Commit the cycle to a validated experiment scope and objective type."""
+
+    tool: Literal["select_objective"] = "select_objective"
+    kind: ObjectiveKind
+    experiment_ids: list[str] = Field(min_length=1)
+    summary: str = Field(min_length=1)
 
 
 class ListExperimentUpdates(BaseModel):
@@ -68,6 +79,7 @@ class FinishCycle(BaseModel):
 
 AgentToolCall = Annotated[
     ListExperiments
+    | SelectObjective
     | GetExperiment
     | ListExperimentUpdates
     | ListExperimentResults
@@ -91,7 +103,11 @@ class AutonomousReasoningEngine(Protocol):
     """Choose the next tool from the autonomous agent's accumulated context."""
 
     async def decide(
-        self, transcript: list[dict[str, Any]], completed_experiment_ids: list[str]
+        self,
+        transcript: list[dict[str, Any]],
+        completed_experiment_ids: list[str],
+        monitoring: dict[str, dict[str, Any]],
+        evidence: dict[str, dict[str, Any]],
     ) -> AgentTurn:
         """Return one validated tool call without executing it."""
         ...
@@ -121,7 +137,11 @@ class InstructorAutonomousReasoningEngine:
         self._max_tool_calls_per_cycle = max_tool_calls_per_cycle
 
     async def decide(
-        self, transcript: list[dict[str, Any]], completed_experiment_ids: list[str]
+        self,
+        transcript: list[dict[str, Any]],
+        completed_experiment_ids: list[str],
+        monitoring: dict[str, dict[str, Any]],
+        evidence: dict[str, dict[str, Any]],
     ) -> AgentTurn:
         """Ask the LLM to inspect tool results and select exactly one next tool."""
         if len(transcript) >= self._max_tool_calls_per_cycle:
@@ -142,6 +162,8 @@ class InstructorAutonomousReasoningEngine:
                             "remaining_tool_calls": self._max_tool_calls_per_cycle
                             - len(transcript),
                             "completed_experiment_ids": completed_experiment_ids,
+                            "monitoring": monitoring,
+                            "evidence": evidence,
                             "tool_transcript": transcript,
                         }
                     ),
@@ -155,7 +177,11 @@ class DemoAutonomousReasoningEngine:
     """Exercise the complete tool loop deterministically without LLM credentials."""
 
     async def decide(
-        self, transcript: list[dict[str, Any]], completed_experiment_ids: list[str]
+        self,
+        transcript: list[dict[str, Any]],
+        completed_experiment_ids: list[str],
+        monitoring: dict[str, dict[str, Any]],
+        evidence: dict[str, dict[str, Any]],
     ) -> AgentTurn:
         """Choose representative discovery, inspection, wait, update, and finish calls."""
         if not transcript:
@@ -181,7 +207,18 @@ class DemoAutonomousReasoningEngine:
                 active[0]["id"],
             )
             return AgentTurn(
-                rationale="Inspect the newest active experiment before deciding what to do.",
+                rationale="Commit this cycle to the selected experiment before inspecting it.",
+                action=SelectObjective(
+                    kind="monitor",
+                    experiment_ids=[experiment_id],
+                    summary=f"Monitor experiment {experiment_id} until it is actionable.",
+                ),
+            )
+
+        if tool == "select_objective":
+            experiment_id = latest["result"]["experiment_ids"][0]
+            return AgentTurn(
+                rationale="Inspect the experiment selected for this cycle.",
                 action=GetExperiment(experiment_id=experiment_id),
             )
 
@@ -240,12 +277,6 @@ class DemoAutonomousReasoningEngine:
                     title=f"Experiment {call['experiment_id']} results are ready",
                     body=f"Foundry returned {result_page['count']} available result(s).",
                 ),
-            )
-
-        if tool == "send_update":
-            return AgentTurn(
-                rationale="The operator update was delivered and this objective is complete.",
-                action=FinishCycle(summary="Inspected results and updated the operator."),
             )
 
         return AgentTurn(
