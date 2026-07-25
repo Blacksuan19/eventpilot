@@ -1,9 +1,9 @@
 # EventPilot
 
-EventPilot is an autonomous, LLM-centered agent for long-running Adaptyv Foundry experiments. It
-discovers current experiments through an API-shaped Foundry mock, chooses which work deserves attention,
-investigates with additional API tools, controls its own polling cadence, sends operator updates,
-and starts a fresh objective when its current work is complete.
+EventPilot is an autonomous, LLM-centered monitoring agent with pluggable data sources and alert
+sinks. A source supplies platform-specific typed tools and deterministic policy; the generic
+LangGraph runtime chooses work, controls polling, performs source actions, and sends evidenced
+alerts. This demo configures an Adaptyv Foundry source backed by an API-shaped mock.
 
 The repository is a focused demonstration. It uses Instructor for provider-neutral structured LLM
 decisions, LangGraph for the agent/tool loop, and SQLite checkpoints for durable state. It does not
@@ -12,26 +12,24 @@ require webhooks or an external scheduler.
 ## Agent loop
 
 ```text
-LLM agent ◄──► tool executor
-             ├── list_experiments
-             ├── select_objective
-             ├── get_experiment
-             ├── list_experiment_updates
-             ├── list_experiment_results
-             ├── send_update ──► END
+LLM agent ◄──► generic tool router
+             ├── registered source tool ──► DataSource
+             ├── send_alert ──► NotificationSink ──► END
              ├── wait
              └── finish_cycle ──► END
 ```
 
-The LLM selects exactly one validated tool call on every turn. After discovery it must commit to a
-typed objective and experiment scope. LangGraph rejects out-of-scope calls without executing them.
-Tool results are appended to the working transcript and control returns to the LLM. `wait` pauses
-inside the active graph invocation; `send_update` or `finish_cycle` ends that finite invocation, and
-the runtime immediately starts a fresh discovery cycle on the same SQLite-backed thread.
+The LLM selects exactly one validated tool call on every turn. Instructor composes its response
+schema and tool descriptions dynamically from adapter, source-policy, and core Pydantic models;
+prompts contain behavior rather than duplicated signatures. Source results are appended to the
+working transcript and its private state is persisted opaquely by LangGraph. `wait` pauses inside
+the active invocation; `send_alert` or `finish_cycle` ends that finite invocation, and the runtime
+immediately starts a fresh cycle on the same SQLite-backed thread.
 
-SQLite also preserves per-experiment monitoring records: the last check time, latest observed and
-reported statuses, and next eligible poll time. Fresh cycles omit experiments whose polling window
-has not opened and reject duplicate reports for an unchanged status.
+The source plugin owns tool availability, evidence, scope, deduplication, and scheduling rules. A
+GitHub Actions source could therefore expose `gh`-backed workflow tools without changing the graph.
+The configured Adaptyv plugin preserves per-experiment monitoring records and rejects out-of-scope
+calls or duplicate unchanged reports.
 
 The Foundry adapter models the documented REST operations directly:
 
@@ -112,18 +110,17 @@ artifacts.
 
 ```text
 src/eventpilot/
-├── adapters/       # Foundry API models and protocol
-├── core/           # Agent decisions, LangGraph runtime, and action contracts
-├── notifications/  # Operator-update providers
-├── prompts/        # Versioned agent instructions
+├── adapters/       # External API models, clients, and scoped test doubles
+├── core/           # Source-agnostic reasoning and LangGraph runtime
+├── sources/        # Pluggable tools, state, and platform policy
+├── notifications/  # Alert-delivery providers
+├── prompts/        # Generic and source-specific instructions
 ├── cli.py          # Continuous and bounded runtime entrypoints
-├── fixtures/       # Mock experiment collections and lifecycle events
-└── simulator.py    # Fixture-backed Foundry API mock
+└── fixtures/       # Mock experiment collections and lifecycle events
 ```
 
 ## Safety boundary
 
-The model controls objective selection, investigation, cadence, and available actions. Deterministic
-graph code validates objective shape, restricts experiment tools to the selected scope, terminates
-cycles after delivery, validates API responses, selects the trusted notification destination,
-persists checkpoints, and enforces any future approval gates for consequential write tools.
+The model controls investigation, cadence, and registered actions. The generic graph controls tool
+routing, alert delivery, cycle termination, and checkpoints. Each source validates its own scope,
+evidence, API responses, and future approval gates for consequential platform actions.
