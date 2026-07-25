@@ -1,0 +1,10 @@
+.git
+.venv
+.eventpilot
+.env
+.pytest_cache
+.ruff_cache
+dist
+build
+__pycache__
+*.pyc

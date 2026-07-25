@@ -1,0 +1,10 @@
+services:
+  eventpilot:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - eventpilot-data:/data
+
+volumes:
+  eventpilot-data:

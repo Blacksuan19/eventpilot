@@ -1,0 +1,16 @@
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+RUN uv sync --frozen --no-dev
+
+RUN mkdir -p /data
+ENV EVENTPILOT_DATABASE_PATH=/data/checkpoints.sqlite
+
+CMD ["uv", "run", "--no-sync", "eventpilot", "run"]
