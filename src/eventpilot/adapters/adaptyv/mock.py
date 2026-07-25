@@ -137,6 +137,6 @@ class MockFoundryClient:
 
 def load_scenarios() -> list[ExperimentScenario]:
     """Parse a fresh copy of every packaged experiment scenario."""
-    fixture = files("eventpilot.fixtures").joinpath("experiments.json")
+    fixture = files("eventpilot.adapters.adaptyv.fixtures").joinpath("experiments.json")
     payload = json.loads(fixture.read_text(encoding="utf-8"))
     return [ExperimentScenario.model_validate(item) for item in payload]

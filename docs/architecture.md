@@ -28,10 +28,11 @@ set without adding graph nodes or routing branches.
 
 ## Data-source contract
 
-A platform adapter publishes typed API operations and executes them through its client transport.
-The data source composes those operations with any policy-only tools and provides:
+A platform adapter publishes typed API operations and instructions, then executes those operations
+through its client transport. The data source composes those operations with any policy-only tools
+and provides:
 
-- A stable name and source-specific prompt instructions.
+- A stable name and the adapter-provided instructions.
 - Any source-owned tool models with unique `tool` discriminators.
 - Deterministic tool availability based on its private durable state.
 - Parsing and execution for every registered tool.

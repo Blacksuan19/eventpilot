@@ -1,5 +1,6 @@
 """Expose documented Foundry operations as typed agent tools."""
 
+from importlib.resources import files
 from typing import Any, Literal
 
 from pydantic import Field
@@ -50,6 +51,11 @@ class FoundryToolAdapter:
     def __init__(self, client: FoundryClient) -> None:
         """Bind the tool adapter to a live or fixture-backed Foundry client."""
         self._client = client
+        self.instructions = (
+            files("eventpilot.adapters.adaptyv")
+            .joinpath("instructions.txt")
+            .read_text(encoding="utf-8")
+        )
         self._tool_types = {
             tool_type.model_fields["tool"].default: tool_type for tool_type in self.tool_types
         }

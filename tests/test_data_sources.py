@@ -175,6 +175,7 @@ def test_adapter_publishes_structured_tool_descriptions() -> None:
     list_schema = next(schema for schema in catalog if schema["title"] == "ListExperiments")
 
     assert ListExperiments in adapter.tool_types
+    assert adapter.instructions.startswith("Data source: Adaptyv Foundry")
     assert list_schema["description"].startswith("List experiments visible")
     assert list_schema["properties"]["limit"]["description"] == "Maximum records to return."
     assert list_schema["properties"]["limit"]["maximum"] == 100

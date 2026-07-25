@@ -5,7 +5,11 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from eventpilot.adapters.adaptyv import ExperimentStatus, FoundryClient, FoundryToolAdapter
+from eventpilot.adapters.adaptyv import (
+    ExperimentStatus,
+    FoundryClient,
+    FoundryToolAdapter,
+)
 from eventpilot.adapters.adaptyv.tools import (
     GetExperiment,
     ListExperimentResults,
@@ -13,7 +17,6 @@ from eventpilot.adapters.adaptyv.tools import (
     ListExperimentUpdates,
 )
 from eventpilot.core.agent_reasoning import AgentTurn, SendAlert, Wait
-from eventpilot.prompts.loader import load_prompt
 from eventpilot.sources.base import SourceContext, SourceExecution, SourceToolCall
 
 ObjectiveKind = Literal["monitor", "report_results", "status_digest", "investigate_incident"]
@@ -25,7 +28,8 @@ class SelectObjective(SourceToolCall):
     tool: Literal["select_objective"] = "select_objective"
     kind: ObjectiveKind = Field(description="Monitoring objective enforced for this cycle.")
     experiment_ids: list[str] = Field(
-        min_length=1, description="Discovered experiment identifiers included in the objective."
+        min_length=1,
+        description="Discovered experiment identifiers included in the objective.",
     )
     summary: str = Field(min_length=1, description="Purpose and scope of this objective.")
 
@@ -42,7 +46,7 @@ class AdaptyvDataSource:
             *self._adapter.tool_types,
             SelectObjective,
         )
-        self.instructions = load_prompt("sources/adaptyv.txt")
+        self.instructions = self._adapter.instructions
         self._tool_types = {
             tool_type.model_fields["tool"].default: tool_type for tool_type in self.tool_types
         }
@@ -305,7 +309,10 @@ class AdaptyvDataSource:
         objective = state.get("objective")
         scoped_ids = set(objective["experiment_ids"]) if objective else set()
         if experiment_id not in scoped_ids:
-            return {"status": "rejected", "reason": "Experiment is outside objective scope."}
+            return {
+                "status": "rejected",
+                "reason": "Experiment is outside objective scope.",
+            }
         return None
 
     @staticmethod

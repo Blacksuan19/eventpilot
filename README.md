@@ -114,9 +114,8 @@ src/eventpilot/
 ├── core/           # Source-agnostic reasoning and LangGraph runtime
 ├── sources/        # Pluggable tools, state, and platform policy
 ├── notifications/  # Alert-delivery providers
-├── prompts/        # Generic and source-specific instructions
-├── cli.py          # Continuous and bounded runtime entrypoints
-└── fixtures/       # Mock experiment collections and lifecycle events
+├── prompts/        # Source-neutral agent instructions
+└── cli.py          # Continuous and bounded runtime entrypoints
 ```
 
 ## Safety boundary
