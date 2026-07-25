@@ -20,14 +20,16 @@ Adaptyv's published API. Fixture timing and lifecycle data stay hidden behind th
 - Interleaves concurrent objectives instead of blocking on one resource.
 - Chooses its own polling interval with a `wait` tool.
 - Uses source evidence to decide whether to act, continue investigating, or notify an operator.
+- Suspends consequential tools for explicit human approval, then executes or rejects the action.
 - Delivers updates through a replaceable notification sink and records successful delivery.
 - Persists progress, avoids duplicate work, and resumes across finite reasoning cycles.
 - Enters a long idle wait when the source has no actionable work.
 
-Instructor constrains every LLM response to a registered Pydantic tool model. LangGraph routes the
-selected tool and checkpoints agent state in SQLite. Platform details live behind a `DataSource`
-protocol, while delivery lives behind a separate `NotificationSink` protocol. A deployment can pair
-any source with any sink without changing the agent graph.
+Instructor constrains every LLM response to a registered Pydantic tool model. LangGraph routes
+tools, checkpoints state in SQLite, suspends approval-sensitive actions with `interrupt()`, and
+resumes them with `Command`. Platform details live behind a `DataSource` protocol, while delivery
+lives behind a separate `NotificationSink` protocol. A deployment can pair any source with any sink
+without changing the agent graph.
 
 ## Agent loop
 
@@ -45,6 +47,14 @@ flowchart TB
 
         subgraph source_tools[Source tools]
             direction TB
+            approval{Approval required?}
+            approval -->|Yes| approval_message[Send request through NotificationSink]
+            approval_message --> checkpoint[Checkpoint pending action in SQLite]
+            checkpoint --> paused[LangGraph interrupt]
+            paused --> operator{Operator decision}
+            operator -->|Command: approve| source
+            operator -->|Command: reject| rejected
+            approval -->|No| source
             source[DataSource adapter] --> api[Platform API or API-shaped mock]
             api --> outcome[Persist observations, actions, and evidence]
         end
@@ -73,7 +83,7 @@ flowchart TB
         cycle_end[Finish finite cycle] --> runtime
     end
 
-    router -->|source tool| source
+    router -->|source tool| approval
     router -->|send_alert| validate
     router -->|wait| mode
     router -->|finish_cycle| cycle_end
@@ -95,9 +105,9 @@ flowchart TB
     classDef dangerNode fill:#fff0f2,stroke:#d9475f,color:#831b2d,stroke-width:1.5px;
 
     class runtime,agent controlNode;
-    class router,validate,ready,mode decisionNode;
-    class source,api,sink,channel integrationNode;
-    class outcome,delivered stateNode;
+    class router,approval,operator,validate,ready,mode decisionNode;
+    class source,api,approval_message,sink,channel integrationNode;
+    class checkpoint,paused,outcome,delivered stateNode;
     class active_wait,idle_wait actionNode;
     class next_turn,cycle_end lifecycleNode;
     class rejected dangerNode;
@@ -136,6 +146,17 @@ When the agent finds an event worth reporting, it creates the notification from 
 evidence and sends it through the configured sink. Provider credentials and destinations remain
 outside the LLM's tool arguments.
 
+## Human approval
+
+A data source can mark any consequential tool as approval-sensitive. The graph first delivers a
+request through the configured notification sink and checkpoints the pending action. Its next node
+calls LangGraph `interrupt()` with the action, resources, rationale, and delivery receipt.
+
+An operator response resumes the same supervisor thread with `Command(resume=...)`. Approval routes
+to the original source tool; rejection records a rejected tool result and returns control to the
+agent. The SQLite checkpoint preserves the interruption across process restarts, and the delivery
+node remains completed when the graph resumes, preventing a duplicate approval message.
+
 ## Adaptyv API mock
 
 The demo does not require a Foundry account. `MockFoundryClient` implements the same
@@ -146,21 +167,29 @@ official endpoints:
 - [Get an experiment](https://docs.adaptyvbio.com/api-reference/experiments/get-experiment)
 - [List experiment updates](https://docs.adaptyvbio.com/api-reference/experiments/list-experiment-updates)
 - [List results for an experiment](https://docs.adaptyvbio.com/api-reference/experiments/list-results-for-an-experiment)
+- [Update an experiment](https://docs.adaptyvbio.com/api-reference/experiments/update-experiment)
+- [Submit an experiment](https://docs.adaptyvbio.com/api-reference/experiments/submit-experiment)
+- [Get an experiment quote](https://docs.adaptyvbio.com/api-reference/experiments/get-experiment-quote)
+- [Accept an experiment quote](https://docs.adaptyvbio.com/api-reference/experiments/accept-an-experiments-quote-and-create-an-invoice)
 
 See Adaptyv's [API introduction](https://docs.adaptyvbio.com/api-reference/api-introduction) for
 authentication and the production API conventions.
 
-The packaged fixture contains eight independent experiments. Each has lifecycle steps with hidden
-durations. Reads do not advance the fixture; only elapsed clock time does. This lets the real agent
-loop discover status changes, wait, inspect results, and send alerts without a scripted event queue.
+The packaged fixture contains eight independent experiments with hidden lifecycle timing. One draft
+starts below the source's replicate policy, so the agent can update and submit it. One experiment
+has an open quote; the agent reads its USD amount and requests approval before accepting it and
+creating an invoice. Draft and quoted lifecycles remain paused until their actions succeed.
+
+The other lifecycle transitions follow elapsed clock time. Reads leave time unchanged, allowing the
+agent to discover status changes, wait, inspect results, and act without a scripted event queue.
 
 A production integration only needs a `FoundryClient` implementation that performs authenticated
 HTTP requests. The source policy and graph do not depend on the mock.
 
 ## Run the dashboard
 
-The dashboard is an optional demonstration surface for observing the running agent. It is not part
-of the agent loop and is not required by either the source or notification interfaces.
+The dashboard is an optional demonstration surface for observing the running agent and responding
+to approval requests.
 
 Copy the example configuration and add LLM credentials:
 
@@ -182,11 +211,12 @@ docker compose up --build
 ```
 
 Open [http://localhost:8000](http://localhost:8000). The dashboard shows the current decision,
-rationale, typed arguments, experiment states, wait countdowns, delivered alerts, and the complete
-tool timeline. Dashboard events and LangGraph checkpoints persist in the Docker volume.
+rationale, typed arguments, experiment states, wait countdowns, delivered messages, pending
+approvals, and the complete tool timeline. Approval controls submit a LangGraph resume command for
+the suspended tool call. Dashboard events and LangGraph checkpoints persist in the Docker volume.
 
-Use **Reset demo** in the header to cancel the current run, clear its checkpoint and alert history,
-and start again. The container stays running.
+Use **Reset demo** in the header to cancel the current run, delete the supervisor thread through the
+LangGraph checkpointer, clear its event history, and start again. The container stays running.
 
 ## Time compression
 
