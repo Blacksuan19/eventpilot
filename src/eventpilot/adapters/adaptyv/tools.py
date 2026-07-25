@@ -7,7 +7,7 @@ from pydantic import Field
 
 from eventpilot.adapters.adaptyv.client import FoundryClient
 from eventpilot.adapters.adaptyv.models import ModifyExperimentRequest
-from eventpilot.sources.base import SourceToolCall
+from eventpilot.sources.base import SourceToolCall, ToolAvailability
 
 
 class ListExperiments(SourceToolCall):
@@ -43,6 +43,9 @@ class UpdateExperiment(SourceToolCall):
     """Modify fields on an editable Foundry experiment."""
 
     tool: Literal["update_experiment"] = "update_experiment"
+    availability = ToolAvailability(
+        statuses=("Draft", "InReview"), evidence_keys=("detail_observed",)
+    )
     experiment_id: str = Field(min_length=1, description="Foundry experiment identifier.")
     changes: ModifyExperimentRequest = Field(description="Editable fields and replacement values.")
 
@@ -51,6 +54,7 @@ class SubmitExperiment(SourceToolCall):
     """Submit a draft Foundry experiment for review and quote preparation."""
 
     tool: Literal["submit_experiment"] = "submit_experiment"
+    availability = ToolAvailability(statuses=("Draft",), evidence_keys=("detail_observed",))
     experiment_id: str = Field(min_length=1, description="Draft experiment identifier.")
 
 
@@ -58,6 +62,7 @@ class AcceptExperimentQuote(SourceToolCall):
     """Accept a Foundry quote and create an invoice after operator approval."""
 
     tool: Literal["accept_experiment_quote"] = "accept_experiment_quote"
+    availability = ToolAvailability(statuses=("QuoteSent",), evidence_keys=("quote_observed",))
     experiment_id: str = Field(min_length=1, description="Quoted experiment identifier.")
 
 
@@ -65,6 +70,7 @@ class GetExperimentQuote(SourceToolCall):
     """Retrieve price and expiry details for a Foundry experiment quote."""
 
     tool: Literal["get_experiment_quote"] = "get_experiment_quote"
+    availability = ToolAvailability(statuses=("QuoteSent",), evidence_keys=("detail_observed",))
     experiment_id: str = Field(min_length=1, description="Quoted experiment identifier.")
 
 
