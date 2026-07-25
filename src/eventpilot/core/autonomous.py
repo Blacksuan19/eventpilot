@@ -1,4 +1,4 @@
-"""Build and run the autonomous LangGraph tool loop."""
+"""Build and run the generic autonomous LangGraph tool loop."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -9,40 +9,29 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from eventpilot.adapters.adaptyv import FoundryClient
 from eventpilot.core.agent_reasoning import (
-    AgentToolCall,
     AgentTurn,
     AutonomousReasoningEngine,
     FinishCycle,
-    GetExperiment,
-    ListExperimentResults,
-    ListExperiments,
-    ListExperimentUpdates,
-    SelectObjective,
-    SendUpdate,
+    SendAlert,
     Wait,
+    parse_core_tool,
 )
 from eventpilot.core.notifications import Notification
 from eventpilot.notifications.base import NotificationSink
+from eventpilot.sources.base import DataSource, SourceContext, SourceToolCall
 
 
 class AutonomousAgentState(TypedDict, total=False):
-    """Persist tool context and cycle outcomes on one supervisor thread."""
+    """Persist generic loop state and opaque data-source state on one thread."""
 
     transcript: list[dict[str, Any]]
     turn: dict[str, Any]
+    source_state: dict[str, Any]
     outcome: str
     cycle_summary: str | None
     cycle_count: int
     tool_count: int
-    completed_experiment_ids: list[str]
-    objective: dict[str, Any] | None
-    monitoring: dict[str, dict[str, Any]]
-    evidence: dict[str, dict[str, Any]]
-    phase: str
-    objective_waited: bool
-    poll_interval_seconds: int | None
 
 
 Sleep = Callable[[float], Awaitable[None]]
@@ -50,7 +39,7 @@ Sleep = Callable[[float], Awaitable[None]]
 
 def build_autonomous_graph(
     agent: AutonomousReasoningEngine,
-    foundry: FoundryClient,
+    source: DataSource,
     sink: NotificationSink,
     *,
     destination: str = "local-console",
@@ -60,245 +49,73 @@ def build_autonomous_graph(
     max_wait_seconds: int | None = None,
     max_tool_calls_per_cycle: int = 32,
 ) -> Any:
-    """Build a supervisor whose LLM selects every API, action, and lifecycle tool."""
+    """Build a generic supervisor around a registered monitoring data source."""
+
+    def source_state(state: AutonomousAgentState) -> dict[str, Any]:
+        """Return persisted source state or the plugin's initial state."""
+        return state.get("source_state", source.initial_state())
 
     async def reason(state: AutonomousAgentState) -> AutonomousAgentState:
-        """Let the LLM inspect prior tool results and select its next tool call."""
-        turn = await agent.decide(
-            state.get("transcript", []),
-            state.get("completed_experiment_ids", []),
-            state.get("monitoring", {}),
-            state.get("evidence", {}),
-        )
-        print(f"[agent] {turn.action.tool}: {turn.rationale}")
+        """Let the reasoning engine select one core or source-provided tool."""
+        turn = await agent.decide(state.get("transcript", []), source_state(state))
+        print(f"[agent] {turn.action.tool_name}: {turn.rationale}")
         return {"turn": turn.model_dump(mode="json"), "outcome": "tool_selected"}
 
     def route_tool(state: AutonomousAgentState) -> str:
-        """Route only tools exposed by the graph's current deterministic phase."""
-        tool = _turn(state).action.tool
-        phase = state.get("phase", "discovery")
-        allowed = {
-            "discovery": {"list_experiments", "wait", "finish_cycle"},
-            "objective": {"select_objective", "finish_cycle"},
-            "active": {
-                "get_experiment",
-                "list_experiment_updates",
-                "list_experiment_results",
-                "send_update",
-                "wait",
-                "finish_cycle",
-            },
-        }
-        return tool if tool in allowed[phase] else "reject_action"
+        """Route core tools and source tools allowed by deterministic plugin policy."""
+        action = _turn(state, source).action
+        if isinstance(action, SendAlert):
+            return "send_alert"
+        if isinstance(action, Wait):
+            return "wait"
+        if isinstance(action, FinishCycle):
+            return "finish_cycle"
+        if action.tool_name in source.available_tools(source_state(state)):
+            return "source_tool"
+        return "reject_action"
 
-    async def list_experiments(state: AutonomousAgentState) -> AutonomousAgentState:
-        """Execute the documented Foundry experiment-discovery operation."""
-        action = _expect_action(state, ListExperiments)
-        page = await foundry.list_experiments(limit=action.limit, offset=action.offset)
-        completed = set(state.get("completed_experiment_ids", []))
-        monitoring = state.get("monitoring", {})
-        now = clock()
-        actionable = [
-            item
-            for item in page.items
-            if item.id not in completed
-            and monitoring.get(item.id, {}).get("next_poll_at", 0) <= now
-        ]
-        removed_count = len(page.items) - len(actionable)
-        result = page.model_dump(mode="json")
-        result.update(items=[item.model_dump(mode="json") for item in actionable])
-        result.update(count=len(actionable), total=max(0, page.total - removed_count))
-        update = _tool_result(state, action, result)
-        evidence = _evidence_copy(state)
-        for item in actionable:
-            evidence.setdefault(item.id, {}).update(
-                status=item.status.value,
-                results_status=item.results_status.value,
-                observed_at=now,
-            )
+    async def source_tool(state: AutonomousAgentState) -> AutonomousAgentState:
+        """Execute one plugin-owned typed tool without knowing platform semantics."""
+        action = _turn(state, source).action
+        context = SourceContext(
+            state=source_state(state),
+            transcript=state.get("transcript", []),
+            clock=clock,
+            max_tool_calls_per_cycle=max_tool_calls_per_cycle,
+        )
+        execution = await source.execute(action, context)
+        update = _tool_result(state, action, execution.result)
+        update["source_state"] = execution.state
+        return update
+
+    async def send_alert(state: AutonomousAgentState) -> AutonomousAgentState:
+        """Deliver an alert after the source validates its resource evidence."""
+        action = _expect_action(state, source, SendAlert)
+        current_source_state = source_state(state)
+        rejection = source.validate_alert(action.resource_ids, current_source_state)
+        if rejection:
+            return _rejected_tool_result(state, action, rejection)
+        receipt = await sink.send(
+            destination,
+            Notification(title=action.title, body=action.body, priority=action.priority),
+        )
+        update = _tool_result(state, action, receipt.model_dump(mode="json"))
         update.update(
-            evidence=evidence,
-            phase="objective" if actionable else "discovery",
-        )
-        return update
-
-    async def get_experiment(state: AutonomousAgentState) -> AutonomousAgentState:
-        """Execute the documented Foundry experiment-detail operation."""
-        action = _expect_action(state, GetExperiment)
-        if action.experiment_id not in _objective_ids(state):
-            return _rejected_tool_result(state, action, "Experiment is outside objective scope.")
-        experiment = await foundry.get_experiment(action.experiment_id)
-        update = _tool_result(state, action, experiment.model_dump(mode="json"))
-        evidence = _evidence_copy(state)
-        evidence.setdefault(action.experiment_id, {}).update(
-            status=experiment.status.value,
-            results_status=experiment.results_status.value,
-            observed_at=clock(),
-        )
-        monitoring = _monitoring_copy(state)
-        monitoring.setdefault(action.experiment_id, {}).update(
-            last_checked_at=clock(), last_observed_status=experiment.status.value
-        )
-        update.update(monitoring=monitoring, evidence=evidence)
-        return update
-
-    async def select_objective(state: AutonomousAgentState) -> AutonomousAgentState:
-        """Persist the validated experiment scope selected for this cycle."""
-        action = _expect_action(state, SelectObjective)
-        discovery = next(
-            (
-                entry
-                for entry in reversed(state.get("transcript", []))
-                if entry["tool"] == "list_experiments" and "items" in entry["result"]
+            source_state=source.record_alert(
+                action.resource_ids, current_source_state, delivered_at=clock()
             ),
-            None,
-        )
-        discovered_ids = (
-            {item["id"] for item in discovery["result"]["items"]} if discovery else set()
-        )
-        selected_ids = set(action.experiment_ids)
-        if len(selected_ids) != len(action.experiment_ids):
-            return _rejected_tool_result(
-                state, action, "Objective experiment identifiers must be unique."
-            )
-        if not selected_ids.issubset(discovered_ids):
-            return _rejected_tool_result(
-                state, action, "Objective contains an experiment absent from discovery."
-            )
-        if action.kind == "monitor" and len(selected_ids) != 1:
-            return _rejected_tool_result(
-                state, action, "A monitor objective requires exactly one experiment."
-            )
-        if action.kind == "status_digest" and len(selected_ids) < 2:
-            return _rejected_tool_result(
-                state, action, "A status digest requires at least two experiments."
-            )
-        objective = action.model_dump(mode="json", exclude={"tool"})
-        update = _tool_result(state, action, objective)
-        update.update(
-            objective=objective,
-            phase="active",
-            objective_waited=False,
-            poll_interval_seconds=None,
-        )
-        return update
-
-    async def list_experiment_updates(state: AutonomousAgentState) -> AutonomousAgentState:
-        """Execute the documented Foundry experiment-updates operation."""
-        action = _expect_action(state, ListExperimentUpdates)
-        if action.experiment_id not in _objective_ids(state):
-            return _rejected_tool_result(state, action, "Experiment is outside objective scope.")
-        page = await foundry.list_experiment_updates(action.experiment_id)
-        update = _tool_result(state, action, page.model_dump(mode="json"))
-        evidence = _evidence_copy(state)
-        evidence.setdefault(action.experiment_id, {}).update(
-            update_count=page.count, updates_observed_at=clock()
-        )
-        update["evidence"] = evidence
-        return update
-
-    async def list_experiment_results(state: AutonomousAgentState) -> AutonomousAgentState:
-        """Execute the documented Foundry experiment-results operation."""
-        action = _expect_action(state, ListExperimentResults)
-        if action.experiment_id not in _objective_ids(state):
-            return _rejected_tool_result(state, action, "Experiment is outside objective scope.")
-        page = await foundry.list_experiment_results(action.experiment_id)
-        update = _tool_result(state, action, page.model_dump(mode="json"))
-        evidence = _evidence_copy(state)
-        evidence.setdefault(action.experiment_id, {}).update(
-            result_count=page.count, results_observed_at=clock()
-        )
-        update["evidence"] = evidence
-        return update
-
-    async def send_update(state: AutonomousAgentState) -> AutonomousAgentState:
-        """Execute the trusted operator-update action requested by the agent."""
-        action = _expect_action(state, SendUpdate)
-        if not set(action.experiment_ids).issubset(_objective_ids(state)):
-            return _rejected_tool_result(state, action, "Experiment is outside objective scope.")
-        objective = state.get("objective") or {}
-        evidence = state.get("evidence", {})
-        results_ready = {
-            experiment_id: evidence.get(experiment_id, {}).get("result_count", 0) > 0
-            or (
-                evidence.get(experiment_id, {}).get("status") == "Done"
-                and evidence.get(experiment_id, {}).get("results_status") in {"Partial", "All"}
-            )
-            for experiment_id in action.experiment_ids
-        }
-        if objective.get("kind") == "report_results" and not all(results_ready.values()):
-            return _rejected_tool_result(
-                state, action, "Result reports require evidence for every experiment."
-            )
-        if (
-            objective.get("kind") == "monitor"
-            and not any(results_ready.values())
-            and not state.get("objective_waited", False)
-        ):
-            return _rejected_tool_result(
-                state, action, "Active monitoring requires a polling wait before reporting."
-            )
-        monitoring = state.get("monitoring", {})
-        if objective.get("kind") == "monitor" and not any(results_ready.values()):
-            unchanged_ids = [
-                experiment_id
-                for experiment_id in action.experiment_ids
-                if monitoring.get(experiment_id, {}).get("last_reported_status")
-                == evidence.get(experiment_id, {}).get("status")
-            ]
-            if unchanged_ids:
-                return _rejected_tool_result(
-                    state, action, "An unchanged monitor status was already reported."
-                )
-        completed = state.get("completed_experiment_ids", [])
-        if set(action.experiment_ids).issubset(completed):
-            update = _tool_result(
-                state,
-                action,
-                {"status": "skipped", "reason": "experiment results already delivered"},
-            )
-        else:
-            receipt = await sink.send(
-                destination,
-                Notification(title=action.title, body=action.body, priority=action.priority),
-            )
-            update = _tool_result(state, action, receipt.model_dump(mode="json"))
-            evidenced_completions = [
-                experiment_id
-                for experiment_id in action.experiment_ids
-                if results_ready[experiment_id]
-            ]
-            if evidenced_completions:
-                update["completed_experiment_ids"] = list(
-                    dict.fromkeys([*completed, *evidenced_completions])
-                )
-        update.update(
-            cycle_summary=f"Delivered update for {', '.join(action.experiment_ids)}.",
+            cycle_summary=f"Delivered alert for {', '.join(action.resource_ids)}.",
             cycle_count=state.get("cycle_count", 0) + 1,
-            objective=None,
-            phase="discovery",
-            objective_waited=False,
-            poll_interval_seconds=None,
             tool_count=0,
             outcome="cycle_finished",
         )
-        monitoring = _monitoring_copy(state)
-        next_interval = state.get("poll_interval_seconds")
-        for experiment_id in action.experiment_ids:
-            record = monitoring.setdefault(experiment_id, {})
-            observed_status = evidence.get(experiment_id, {}).get("status")
-            if observed_status is not None:
-                record["last_reported_status"] = observed_status
-            if next_interval is not None:
-                record["next_poll_at"] = clock() + next_interval
-        update["monitoring"] = monitoring
         return update
 
     async def wait(state: AutonomousAgentState) -> AutonomousAgentState:
-        """Execute the agent-controlled pause and return completion to the agent."""
-        action = _expect_action(state, Wait)
+        """Pause for the model-selected interval and notify the source scheduler."""
+        action = _expect_action(state, source, Wait)
         elapsed_seconds = min(action.seconds, max_wait_seconds or action.seconds)
-        next_poll_at = clock() + elapsed_seconds
+        wake_at = clock() + elapsed_seconds
         await sleep(elapsed_seconds)
         update = _tool_result(
             state,
@@ -310,138 +127,108 @@ def build_autonomous_graph(
                 "reason": action.reason,
             },
         )
-        monitoring = _monitoring_copy(state)
-        objective = state.get("objective")
-        if objective:
-            for experiment_id in objective["experiment_ids"]:
-                monitoring.setdefault(experiment_id, {})["next_poll_at"] = next_poll_at
-        update.update(
-            monitoring=monitoring,
-            objective_waited=True,
-            poll_interval_seconds=action.seconds,
+        update["source_state"] = source.after_wait(
+            source_state(state), requested_seconds=action.seconds, wake_at=wake_at
         )
         return update
 
     async def finish_cycle(state: AutonomousAgentState) -> AutonomousAgentState:
-        """End this invocation when the agent explicitly completes its objective."""
-        action = _expect_action(state, FinishCycle)
-        objective = state.get("objective")
-        if (
-            objective
-            and objective["kind"] == "monitor"
-            and state.get("tool_count", 0) < max_tool_calls_per_cycle
-        ):
-            return _rejected_tool_result(
-                state, action, "A monitor remains active until delivery or budget yield."
-            )
+        """End one bounded invocation after source-owned policy approves completion."""
+        action = _expect_action(state, source, FinishCycle)
+        rejection = source.validate_finish(
+            source_state(state),
+            tool_count=state.get("tool_count", 0),
+            max_tool_calls=max_tool_calls_per_cycle,
+        )
+        if rejection:
+            return _rejected_tool_result(state, action, rejection)
         return {
             "cycle_summary": action.summary,
             "cycle_count": state.get("cycle_count", 0) + 1,
-            "objective": None,
-            "phase": "discovery",
-            "objective_waited": False,
-            "poll_interval_seconds": None,
+            "source_state": source.record_finish(source_state(state)),
             "tool_count": 0,
             "outcome": "cycle_finished",
         }
 
     async def reject_action(state: AutonomousAgentState) -> AutonomousAgentState:
-        """Return a deterministic policy rejection to the agent without side effects."""
-        action = _turn(state).action
-        phase = state.get("phase", "discovery")
+        """Reject an unavailable plugin tool without executing side effects."""
+        action = _turn(state, source).action
         return _rejected_tool_result(
-            state, action, f"Tool {action.tool} is unavailable during {phase} phase."
+            state,
+            action,
+            f"Tool {action.tool_name} is unavailable in the current {source.name} state.",
         )
 
     builder = StateGraph(AutonomousAgentState)
     builder.add_node("agent", reason)
-    tools = {
-        "list_experiments": list_experiments,
-        "select_objective": select_objective,
-        "get_experiment": get_experiment,
-        "list_experiment_updates": list_experiment_updates,
-        "list_experiment_results": list_experiment_results,
-        "send_update": send_update,
-        "wait": wait,
-        "finish_cycle": finish_cycle,
-    }
-    for name, tool in tools.items():
-        builder.add_node(name, tool)
-    builder.add_edge(START, "agent")
+    builder.add_node("source_tool", source_tool)
+    builder.add_node("send_alert", send_alert)
+    builder.add_node("wait", wait)
+    builder.add_node("finish_cycle", finish_cycle)
     builder.add_node("reject_action", reject_action)
+    builder.add_edge(START, "agent")
     builder.add_conditional_edges(
-        "agent", route_tool, {**{name: name for name in tools}, "reject_action": "reject_action"}
+        "agent",
+        route_tool,
+        {
+            "source_tool": "source_tool",
+            "send_alert": "send_alert",
+            "wait": "wait",
+            "finish_cycle": "finish_cycle",
+            "reject_action": "reject_action",
+        },
     )
-    for name in tools:
-        if name in {"send_update", "finish_cycle"}:
-            builder.add_conditional_edges(
-                name,
-                lambda state: "end" if state.get("outcome") == "cycle_finished" else "agent",
-                {"end": END, "agent": "agent"},
-            )
-        else:
-            builder.add_edge(name, "agent")
+    builder.add_edge("source_tool", "agent")
+    builder.add_edge("wait", "agent")
     builder.add_edge("reject_action", "agent")
+    for node in ("send_alert", "finish_cycle"):
+        builder.add_conditional_edges(
+            node,
+            lambda state: "end" if state.get("outcome") == "cycle_finished" else "agent",
+            {"end": END, "agent": "agent"},
+        )
     return builder.compile(checkpointer=checkpointer or InMemorySaver())
 
 
-def _turn(state: AutonomousAgentState) -> AgentTurn:
-    """Validate and return the latest structured agent turn from graph state."""
+def _turn(state: AutonomousAgentState, source: DataSource) -> AgentTurn:
+    """Validate and reconstruct the latest dynamically typed agent turn."""
     raw_turn = state.get("turn")
     if raw_turn is None:
         raise ValueError("Tool execution requires an agent turn")
-    return AgentTurn.model_validate(raw_turn)
+    payload = raw_turn["action"]
+    action = parse_core_tool(payload) or source.parse_tool(payload)
+    return AgentTurn(rationale=raw_turn["rationale"], action=action)
 
 
-def _expect_action[ActionT: AgentToolCall](
-    state: AutonomousAgentState, kind: type[ActionT]
+def _expect_action[ActionT: SourceToolCall](
+    state: AutonomousAgentState, source: DataSource, kind: type[ActionT]
 ) -> ActionT:
-    """Return the chosen action after verifying the routed tool type."""
-    action = _turn(state).action
+    """Return a chosen action after verifying its dynamically routed type."""
+    action = _turn(state, source).action
     if not isinstance(action, kind):
         raise TypeError(f"Expected {kind.__name__}, received {type(action).__name__}")
     return action
 
 
 def _tool_result(
-    state: AutonomousAgentState, action: AgentToolCall, result: dict[str, Any]
+    state: AutonomousAgentState, action: SourceToolCall, result: dict[str, Any]
 ) -> AutonomousAgentState:
-    """Append an executed tool call and result to the agent's working context."""
+    """Append an executed core or source tool call to the working transcript."""
     transcript = [
         *state.get("transcript", []),
-        {"tool": action.tool, "call": action.model_dump(mode="json"), "result": result},
+        {"tool": action.tool_name, "call": action.model_dump(mode="json"), "result": result},
     ]
     return {
         "transcript": transcript,
         "tool_count": state.get("tool_count", 0) + 1,
-        "outcome": f"{action.tool}_completed",
+        "outcome": f"{action.tool_name}_completed",
     }
-
-
-def _monitoring_copy(state: AutonomousAgentState) -> dict[str, dict[str, Any]]:
-    """Copy durable monitoring records before updating nested experiment state."""
-    return {
-        experiment_id: dict(record) for experiment_id, record in state.get("monitoring", {}).items()
-    }
-
-
-def _evidence_copy(state: AutonomousAgentState) -> dict[str, dict[str, Any]]:
-    """Copy typed operational evidence before a tool node records observations."""
-    return {
-        experiment_id: dict(record) for experiment_id, record in state.get("evidence", {}).items()
-    }
-
-
-def _objective_ids(state: AutonomousAgentState) -> set[str]:
-    """Return the experiment identifiers owned by the active graph objective."""
-    objective = state.get("objective")
-    return set(objective["experiment_ids"]) if objective else set()
 
 
 def _rejected_tool_result(
-    state: AutonomousAgentState, action: AgentToolCall, reason: str
+    state: AutonomousAgentState, action: SourceToolCall, reason: str
 ) -> AutonomousAgentState:
-    """Record a deterministic graph rejection without executing side effects."""
+    """Record a deterministic policy rejection without executing side effects."""
     return _tool_result(state, action, {"status": "rejected", "reason": reason})
 
 
@@ -457,12 +244,10 @@ class AgentRuntime:
         }
 
     async def run(self, *, max_cycles: int | None = None) -> AutonomousAgentState:
-        """Run fresh cycles until cancelled or an optional demo limit is reached."""
+        """Run fresh cycles until cancelled or an optional demonstration limit."""
         completed = 0
         result: dict[str, Any] = {}
         while max_cycles is None or completed < max_cycles:
-            result = await self._graph.ainvoke(
-                {"transcript": [], "phase": "discovery"}, config=self._config
-            )
+            result = await self._graph.ainvoke({"transcript": []}, config=self._config)
             completed += 1
         return AutonomousAgentState(**result)
