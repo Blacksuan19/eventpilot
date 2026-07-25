@@ -4,6 +4,7 @@ from pathlib import Path
 
 from httpx import ASGITransport, AsyncClient
 
+from eventpilot.core.approvals import ApprovalDecision
 from eventpilot.core.reporting import AgentDecisionEvent
 from eventpilot.dashboard.app import DashboardEventStore, create_dashboard_app
 
@@ -56,20 +57,36 @@ async def test_dashboard_serves_page_health_and_history() -> None:
     store = DashboardEventStore()
     store.emit(decision_event())
     reset_calls = 0
+    approval_calls: list[tuple[str, ApprovalDecision]] = []
 
     async def reset_agent() -> None:
         """Record one dashboard reset request."""
         nonlocal reset_calls
         reset_calls += 1
 
+    async def resolve_approval(approval_id: str, decision: ApprovalDecision) -> bool:
+        """Record one operator decision from the dashboard."""
+        approval_calls.append((approval_id, decision))
+        return approval_id == "approval-1"
+
     async with AsyncClient(
-        transport=ASGITransport(app=create_dashboard_app(store, reset_agent=reset_agent)),
+        transport=ASGITransport(
+            app=create_dashboard_app(
+                store,
+                reset_agent=reset_agent,
+                resolve_approval=resolve_approval,
+            )
+        ),
         base_url="http://test",
     ) as client:
         page = await client.get("/")
         health = await client.get("/api/health")
         history = await client.get("/api/events")
         reset = await client.post("/api/reset")
+        approval = await client.post("/api/approvals/approval-1", json={"decision": "approved"})
+        missing_approval = await client.post(
+            "/api/approvals/missing", json={"decision": "rejected"}
+        )
 
     assert page.status_code == 200
     assert "EventPilot" in page.text
@@ -80,3 +97,9 @@ async def test_dashboard_serves_page_health_and_history() -> None:
     assert history.json()["events"][0]["tool"] == "get_experiment"
     assert reset.json() == {"status": "reset"}
     assert reset_calls == 1
+    assert approval.json() == {"status": "approved"}
+    assert missing_approval.status_code == 404
+    assert approval_calls == [
+        ("approval-1", ApprovalDecision.APPROVED),
+        ("missing", ApprovalDecision.REJECTED),
+    ]

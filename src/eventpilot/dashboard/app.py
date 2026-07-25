@@ -8,9 +8,11 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel
 
+from eventpilot.core.approvals import ApprovalDecision
 from eventpilot.core.reporting import AgentEvent
 
 
@@ -59,10 +61,20 @@ class DashboardEventStore:
 
 
 ResetAgent = Callable[[], Awaitable[None]]
+ResolveApproval = Callable[[str, ApprovalDecision], Awaitable[bool]]
+
+
+class ApprovalResponse(BaseModel):
+    """Validate an operator decision submitted by an interactive client."""
+
+    decision: ApprovalDecision
 
 
 def create_dashboard_app(
-    store: DashboardEventStore, *, reset_agent: ResetAgent | None = None
+    store: DashboardEventStore,
+    *,
+    reset_agent: ResetAgent | None = None,
+    resolve_approval: ResolveApproval | None = None,
 ) -> FastAPI:
     """Create the HTTP and server-sent-event interface for one event store."""
     app = FastAPI(title="EventPilot Live", docs_url=None, redoc_url=None)
@@ -89,6 +101,13 @@ def create_dashboard_app(
             return {"status": "unavailable"}
         await reset_agent()
         return {"status": "reset"}
+
+    @app.post("/api/approvals/{approval_id}")
+    async def resolve(approval_id: str, response: ApprovalResponse) -> dict[str, str]:
+        """Resume a suspended tool call with an operator's decision."""
+        if resolve_approval is None or not await resolve_approval(approval_id, response.decision):
+            raise HTTPException(status_code=404, detail="Pending approval not found")
+        return {"status": response.decision.value}
 
     @app.get("/api/stream")
     async def stream() -> StreamingResponse:
