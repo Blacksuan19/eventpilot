@@ -5,9 +5,10 @@ what is happening, chooses which tools to use, decides when to check again, take
 actions, and sends useful updates through a configured notification channel. It runs continuously
 without requiring webhooks or an external scheduler.
 
-A `DataSource` defines its domain by registering typed tools for its resources, events, and
-operations. These tools can inspect state or change it—for example, reading a result, restarting a
-failed workflow, cancelling a job, submitting follow-up work, or updating an incident.
+A `DataSource` defines its domain by registering typed tools and translating their responses into
+generic resource observations. These tools can inspect state or change it—for example, reading a
+result, restarting a failed workflow, cancelling a job, submitting follow-up work, or updating an
+incident.
 
 This repository demonstrates that architecture against
 [Adaptyv Foundry](https://foundry.adaptyvbio.com/). Foundry access is mocked, but its adapter follows
@@ -27,9 +28,9 @@ Adaptyv's published API. Fixture timing and lifecycle data stay hidden behind th
 
 Instructor constrains every LLM response to a registered Pydantic tool model. LangGraph routes
 tools, checkpoints state in SQLite, suspends approval-sensitive actions with `interrupt()`, and
-resumes them with `Command`. Platform details live behind a `DataSource` protocol, while delivery
-lives behind a separate `NotificationSink` protocol. A deployment can pair any source with any sink
-without changing the agent graph.
+resumes them with `Command`. Its reducers own objectives, polling, evidence, delivery state, and
+cycle transitions. Platform details live behind a narrow `DataSource` protocol, while delivery lives
+behind a separate `NotificationSink` protocol. A deployment can pair any source with any sink.
 
 ## Agent loop
 
@@ -56,7 +57,8 @@ flowchart TB
             operator -->|Command: reject| rejected
             approval -->|No| source
             source[DataSource adapter] --> api[Platform API or API-shaped mock]
-            api --> outcome[Persist observations, actions, and evidence]
+            api --> effects[Normalize resource effects]
+            effects --> outcome[LangGraph reducer persists monitoring state]
         end
 
         subgraph notify[Notify]
@@ -107,7 +109,7 @@ flowchart TB
     class runtime,agent controlNode;
     class router,approval,operator,validate,ready,mode decisionNode;
     class source,api,approval_message,sink,channel integrationNode;
-    class checkpoint,paused,outcome,delivered stateNode;
+    class checkpoint,paused,effects,outcome,delivered stateNode;
     class active_wait,idle_wait actionNode;
     class next_turn,cycle_end lifecycleNode;
     class rejected dangerNode;
@@ -184,7 +186,7 @@ The other lifecycle transitions follow elapsed clock time. Reads leave time unch
 agent to discover status changes, wait, inspect results, and act without a scripted event queue.
 
 A production integration only needs a `FoundryClient` implementation that performs authenticated
-HTTP requests. The source policy and graph do not depend on the mock.
+HTTP requests. The graph consumes the same normalized effects from either client.
 
 ## Run the dashboard
 
