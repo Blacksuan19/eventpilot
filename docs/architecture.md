@@ -15,7 +15,7 @@ Docker container
             ├── get_experiment(experiment_id)
             ├── list_experiment_updates(experiment_id)
             ├── list_experiment_results(experiment_id)
-            ├── send_update(title, body, priority)
+            ├── send_update(experiment_ids, title, body, priority)
             ├── wait(seconds, reason) ──► LLM agent
             └── finish_cycle(summary) ──► END
 ```
@@ -47,9 +47,10 @@ checkpoints; it does not attempt to persist an OS timer. An extra read after rec
 
 ## Foundry boundary
 
-The `FoundryClient` protocol exposes the documented list, detail, update, and result operations. The
-authenticated HTTP implementation and offline simulator both implement this protocol. Foundry
-schemas remain in the adapter and tool results cross into the agent as validated JSON.
+The `FoundryClient` protocol exposes the documented list, detail, update, and result operations. A
+fixture-backed mock implements that boundary for the demo and serves many independently progressing
+experiments from stored API records. Foundry schemas remain in the adapter and tool results cross
+into the agent as validated JSON.
 
 This design makes discovery autonomous without inventing a webhook or internal event schema. New
 documented Foundry operations can be added as tools without changing the agent loop.
@@ -59,6 +60,6 @@ documented Foundry operations can be added as tools without changing the agent l
 - The LLM chooses objectives, API tools, action tools, and polling cadence.
 - LangGraph owns control flow, tool routing, cycle state, and checkpoints.
 - Instructor validates every model-selected tool and its arguments.
-- Foundry adapters own external schemas, authentication, and HTTP errors.
+- The Foundry mock owns API schemas, fixture state, and lifecycle progression.
 - Action providers own delivery side effects and trusted destinations.
 - Docker owns process startup and crash recovery only.
