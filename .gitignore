@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local configuration and runtime state
+.env
+.eventpilot/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/

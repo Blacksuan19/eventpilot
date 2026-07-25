@@ -1,0 +1,56 @@
+[project]
+name = "eventpilot"
+version = "0.1.0"
+description = "An autonomous experiment-operations agent powered by LangGraph"
+readme = "README.md"
+authors = [
+    { name = "blacksuan19", email = "abubakaryagob@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "httpx==0.28.1",
+    "instructor==1.15.4",
+    "langgraph==1.2.9",
+    "langgraph-checkpoint-sqlite==3.1.0",
+    "pydantic-settings==2.14.2",
+]
+
+[project.scripts]
+eventpilot = "eventpilot.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pyright==1.1.411",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.0",
+]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "D"]
+ignore = ["D203", "D213"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+executionEnvironments = [
+    { root = "src", extraPaths = ["src"] },
+    { root = "tests", extraPaths = ["src"] },
+]
