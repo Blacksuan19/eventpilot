@@ -14,18 +14,24 @@ require webhooks or an external scheduler.
 ```text
 LLM agent ◄──► tool executor
              ├── list_experiments
+             ├── select_objective
              ├── get_experiment
              ├── list_experiment_updates
              ├── list_experiment_results
-             ├── send_update
+             ├── send_update ──► END
              ├── wait
              └── finish_cycle ──► END
 ```
 
-The LLM selects exactly one validated tool call on every turn. Tool results are appended to its
-working transcript and control returns to the LLM. `wait` pauses inside the active graph invocation;
-`finish_cycle` ends that finite invocation, and the long-running runtime immediately starts a fresh
-discovery cycle on the same SQLite-backed thread.
+The LLM selects exactly one validated tool call on every turn. After discovery it must commit to a
+typed objective and experiment scope. LangGraph rejects out-of-scope calls without executing them.
+Tool results are appended to the working transcript and control returns to the LLM. `wait` pauses
+inside the active graph invocation; `send_update` or `finish_cycle` ends that finite invocation, and
+the runtime immediately starts a fresh discovery cycle on the same SQLite-backed thread.
+
+SQLite also preserves per-experiment monitoring records: the last check time, latest observed and
+reported statuses, and next eligible poll time. Fresh cycles omit experiments whose polling window
+has not opened and reject duplicate reports for an unchanged status.
 
 The Foundry adapter models the documented REST operations directly:
 
@@ -36,7 +42,9 @@ The Foundry adapter models the documented REST operations directly:
 
 The fixture-backed mock implements the `FoundryClient` protocol and serves a normal collection of
 experiments. Each experiment advances independently behind that boundary, so the agent discovers
-and acts on API state instead of consuming a pre-scripted queue of events.
+and acts on API state instead of consuming a pre-scripted queue of events. Fixture lifecycle steps
+have hidden durations driven by a monotonic clock. API reads never advance experiment state, and the
+agent sees statuses rather than the configured schedule.
 
 ## Configuration
 
@@ -110,7 +118,7 @@ src/eventpilot/
 
 ## Safety boundary
 
-The model controls investigation, cadence, and available actions. Deterministic code retains narrow
-responsibilities: validating tool calls and API responses, selecting the
-trusted notification destination, persisting checkpoints, and enforcing any future approval gates
-for consequential write tools.
+The model controls objective selection, investigation, cadence, and available actions. Deterministic
+graph code validates objective shape, restricts experiment tools to the selected scope, terminates
+cycles after delivery, validates API responses, selects the trusted notification destination,
+persists checkpoints, and enforces any future approval gates for consequential write tools.
