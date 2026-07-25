@@ -2,9 +2,14 @@ services:
   eventpilot:
     build: .
     env_file: .env
+    environment:
+      EVENTPILOT_TIME_ACCELERATION: ${EVENTPILOT_TIME_ACCELERATION:-3600}
     restart: unless-stopped
+    ports:
+      - "8000:8000"
     volumes:
       - eventpilot-data:/data
+    command: ["uv", "run", "--no-sync", "eventpilot", "dashboard"]
 
 volumes:
   eventpilot-data:

@@ -3,7 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, PositiveFloat, SecretStr
+from pydantic import Field, NonNegativeFloat, PositiveFloat, PositiveInt, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     database_path: Path = Path(".eventpilot/checkpoints.sqlite")
     mock_llm: bool = False
     time_acceleration: PositiveFloat = 1.0
+    max_physical_wait_seconds: NonNegativeFloat = 5.0
+    dashboard_host: str = "0.0.0.0"
+    dashboard_port: PositiveInt = 8000
     llm_provider: str | None = Field(default=None, validation_alias="LLM_PROVIDER")
     llm_model: str | None = Field(default=None, validation_alias="LLM_MODEL")
     llm_api_key: SecretStr | None = Field(default=None, validation_alias="LLM_API_KEY")

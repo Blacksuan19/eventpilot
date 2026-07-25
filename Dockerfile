@@ -13,4 +13,5 @@ RUN uv sync --frozen --no-dev
 RUN mkdir -p /data
 ENV EVENTPILOT_DATABASE_PATH=/data/checkpoints.sqlite
 
-CMD ["uv", "run", "--no-sync", "eventpilot", "run"]
+EXPOSE 8000
+CMD ["uv", "run", "--no-sync", "eventpilot", "dashboard"]

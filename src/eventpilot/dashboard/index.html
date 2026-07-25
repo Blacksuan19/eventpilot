@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EventPilot Live</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
+  <style>
+    :root { color-scheme: dark; --bg:#090d12; --panel:#111821; --line:#24303d; --muted:#8fa0b3; --text:#edf5fc; --cyan:#5eead4; --blue:#60a5fa; --amber:#fbbf24; --red:#fb7185; --green:#4ade80; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:radial-gradient(circle at 15% -10%,#15324a 0,transparent 32%),var(--bg); color:var(--text); font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,sans-serif; }
+    button { font:inherit; }
+    .shell { max-width:1500px; margin:auto; padding:28px; }
+    header { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
+    .brand { display:flex; align-items:center; gap:14px; }
+    .mark { width:42px; height:42px; display:grid; place-items:center; border-radius:12px; background:linear-gradient(135deg,var(--cyan),var(--blue)); color:#061019; font-weight:900; font-size:20px; box-shadow:0 0 34px #5eead433; }
+    h1 { font-size:23px; margin:0; letter-spacing:-.03em; } .subtitle { color:var(--muted); font-size:12px; }
+    .live { display:flex; gap:8px; align-items:center; padding:7px 12px; border:1px solid #2e4e46; background:#10211e; border-radius:999px; color:var(--cyan); font-weight:700; font-size:12px; }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--green); box-shadow:0 0 12px var(--green); }
+    .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px; }
+    .card { background:linear-gradient(180deg,#141c25ee,#0f151dee); border:1px solid var(--line); border-radius:14px; box-shadow:0 18px 55px #0004; }
+    .stat { padding:16px 18px; } .label { text-transform:uppercase; letter-spacing:.11em; font-size:10px; color:var(--muted); font-weight:800; }
+    .value { margin-top:5px; font-size:22px; font-weight:760; letter-spacing:-.03em; } .value.small { font-size:16px; }
+    .layout { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(320px,.85fr); gap:16px; }
+    .stack { display:grid; gap:16px; align-content:start; }
+    .section-head { display:flex; justify-content:space-between; align-items:center; padding:16px 18px 12px; border-bottom:1px solid var(--line); }
+    h2 { font-size:14px; margin:0; } .body { padding:18px; }
+    .activity { min-height:210px; position:relative; overflow:hidden; }
+    .activity:after { content:""; position:absolute; inset:auto -50px -90px auto; width:220px; height:220px; border-radius:50%; background:#60a5fa12; filter:blur(3px); }
+    .tool-row { display:flex; gap:10px; align-items:center; margin-bottom:13px; }
+    .pill { border-radius:7px; padding:4px 8px; font:700 11px ui-monospace,SFMono-Regular,monospace; background:#14293b; color:#8ac8ff; border:1px solid #244665; }
+    .model { color:var(--muted); font:12px ui-monospace,SFMono-Regular,monospace; }
+    .rationale { font-size:20px; line-height:1.35; max-width:850px; letter-spacing:-.02em; margin-bottom:16px; }
+    pre { white-space:pre-wrap; word-break:break-word; margin:0; color:#b7c7d8; font:12px/1.55 ui-monospace,SFMono-Regular,monospace; }
+    .waitbox { display:none; margin-top:18px; } .waitmeta { display:flex; justify-content:space-between; color:var(--muted); font-size:12px; margin-bottom:7px; }
+    .track { height:7px; background:#202b36; border-radius:9px; overflow:hidden; } .bar { height:100%; width:0; background:linear-gradient(90deg,var(--cyan),var(--blue)); transition:width .4s linear; }
+    .filters { display:flex; gap:5px; } .filter { color:var(--muted); background:transparent; border:1px solid transparent; border-radius:7px; padding:4px 8px; cursor:pointer; font-size:11px; }
+    .filter.active { color:var(--text); background:#1b2733; border-color:#2a3948; }
+    .timeline { max-height:630px; overflow:auto; padding:4px 18px 18px; }
+    .event { display:grid; grid-template-columns:22px 1fr; gap:11px; padding:14px 0; border-bottom:1px solid #1d2731; }
+    .icon { width:22px; height:22px; border-radius:50%; display:grid; place-items:center; background:#1d2b38; color:var(--blue); font-size:10px; font-weight:900; }
+    .event.alert .icon { background:#2b2411; color:var(--amber); } .event.wait .icon { color:var(--cyan); }
+    .event-title { display:flex; justify-content:space-between; gap:12px; font-weight:700; font-size:13px; }
+    time { color:var(--muted); font-size:10px; font-weight:500; white-space:nowrap; }
+    .event-copy { color:#b0bfce; margin-top:3px; font-size:12px; }
+    details { margin-top:8px; } summary { cursor:pointer; color:#71869a; font-size:11px; user-select:none; } details pre { margin-top:7px; padding:10px; background:#0a1016; border-radius:8px; max-height:240px; overflow:auto; }
+    .experiments { display:grid; gap:8px; } .experiment { padding:11px 12px; border:1px solid #202c37; background:#0d141b; border-radius:9px; }
+    .exp-top { display:flex; justify-content:space-between; gap:8px; } .exp-id { font-weight:700; font-size:12px; } .status { font-size:10px; padding:2px 7px; border-radius:9px; background:#182b38; color:#8ed4ff; white-space:nowrap; }
+    .status.done { color:var(--green); background:#11291b; } .exp-meta { color:var(--muted); font-size:10px; margin-top:4px; }
+    .alerts { display:grid; gap:9px; } .alert-item { border-left:3px solid var(--amber); background:#18170f; padding:11px 12px; border-radius:4px 9px 9px 4px; }
+    .alert-title { font-weight:750; font-size:12px; } .alert-body { color:#bdbba9; font-size:11px; margin-top:3px; }
+    .empty { color:#6f8295; padding:24px 0; text-align:center; font-size:12px; }
+    @media (max-width:900px) { .layout{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}.shell{padding:16px} }
+  </style>
+</head>
+<body>
+<main class="shell">
+  <header><div class="brand"><div class="mark">E</div><div><h1>EventPilot</h1><div class="subtitle">Autonomous operations · live agent workspace</div></div></div><div class="live"><span class="dot"></span><span id="connection">Connecting</span></div></header>
+  <section class="stats">
+    <div class="card stat"><div class="label">Cycle</div><div class="value" id="cycle">0</div></div>
+    <div class="card stat"><div class="label">Tool calls</div><div class="value" id="tools">0</div></div>
+    <div class="card stat"><div class="label">Source phase</div><div class="value small" id="phase">Starting</div></div>
+    <div class="card stat"><div class="label">Results delivered</div><div class="value" id="completed">0</div></div>
+  </section>
+  <div class="layout">
+    <div class="stack">
+      <section class="card activity"><div class="section-head"><h2>Current agent activity</h2><span class="label" id="source">waiting for source</span></div><div class="body"><div class="tool-row"><span class="pill" id="active-tool">Idle</span><span class="model" id="active-model">No action selected</span></div><div class="rationale" id="rationale">The agent is starting and will choose its first tool shortly.</div><pre id="arguments"></pre><div class="waitbox" id="waitbox"><div class="waitmeta"><span id="wait-reason">Waiting</span><span id="wait-time">0s</span></div><div class="track"><div class="bar" id="waitbar"></div></div></div></div></section>
+      <section class="card"><div class="section-head"><h2>Agent timeline</h2><div class="filters"><button class="filter active" data-filter="all">All</button><button class="filter" data-filter="decision">Decisions</button><button class="filter" data-filter="tool">Tools</button><button class="filter" data-filter="alert">Alerts</button></div></div><div class="timeline" id="timeline"><div class="empty">Waiting for the first agent event…</div></div></section>
+    </div>
+    <aside class="stack">
+      <section class="card"><div class="section-head"><h2>Observed experiments</h2><span class="label" id="experiment-count">0 tracked</span></div><div class="body experiments" id="experiments"><div class="empty">No source evidence yet</div></div></section>
+      <section class="card"><div class="section-head"><h2>Operator alerts</h2><span class="label" id="alert-count">0 sent</span></div><div class="body alerts" id="alerts"><div class="empty">No alerts delivered yet</div></div></section>
+    </aside>
+  </div>
+</main>
+<script>
+  const state={events:[],filter:'all',waitTimer:null};
+  const $=id=>document.getElementById(id); const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const pretty=v=>JSON.stringify(v,null,2); const clock=t=>new Date(t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  function latest(){return state.events[state.events.length-1]||{};} function sourceState(){for(let i=state.events.length-1;i>=0;i--)if(state.events[i].source_state)return state.events[i].source_state;return{};}
+  function renderStats(){const e=latest(),s=sourceState(); $('cycle').textContent=e.cycle_count??0;$('tools').textContent=e.tool_count??0;$('phase').textContent=s.phase||'Starting';$('completed').textContent=(s.completed_experiment_ids||[]).length;$('source').textContent=e.data_source||'waiting for source';}
+  function renderActivity(){const d=[...state.events].reverse().find(e=>e.event==='agent_decision');if(!d)return;$('active-tool').textContent=d.tool;$('active-model').textContent=d.action_model;$('rationale').textContent=d.rationale;$('arguments').textContent=Object.keys(d.arguments||{}).length?pretty(d.arguments):'No arguments';clearInterval(state.waitTimer);$('waitbox').style.display='none';if(d.tool==='wait'){const sec=d.arguments.seconds||0,start=Date.now();$('waitbox').style.display='block';$('wait-reason').textContent=d.arguments.reason||'Waiting';const tick=()=>{const elapsed=(Date.now()-start)/1000,remain=Math.max(0,sec-elapsed);$('wait-time').textContent=`${Math.ceil(remain)}s remaining`;$('waitbar').style.width=`${Math.min(100,elapsed/sec*100)}%`;};tick();state.waitTimer=setInterval(tick,250);}}
+  function kind(e){if(e.event==='agent_decision')return'decision';if(e.event==='tool_result'&&e.tool==='send_alert'&&e.result?.message_id)return'alert';return'tool';}
+  function renderTimeline(){const list=state.events.filter(e=>state.filter==='all'||kind(e)===state.filter).slice(-80).reverse();$('timeline').innerHTML=list.length?list.map(e=>{const k=kind(e),title=k==='decision'?`${e.action_model} selected`:k==='alert'?'Operator alert delivered':`${e.action_model||e.tool} ${e.outcome?.includes('rejected')?'rejected':'completed'}`,copy=k==='decision'?e.rationale:k==='alert'?(e.arguments?.title||'Alert sent'):(e.result?.reason||e.result?.status||e.outcome||'Tool returned');return`<article class="event ${k} ${e.tool==='wait'?'wait':''}"><div class="icon">${k==='decision'?'→':k==='alert'?'!':e.tool==='wait'?'Ⅱ':'✓'}</div><div><div class="event-title"><span>${esc(title)}</span><time>${clock(e.timestamp)}</time></div><div class="event-copy">${esc(copy)}</div><details><summary>Explore event data</summary><pre>${esc(pretty(e))}</pre></details></div></article>`}).join(''):'<div class="empty">No matching events</div>';}
+  function renderExperiments(){const s=sourceState(),evidence=s.evidence||{},monitoring=s.monitoring||{},done=new Set(s.completed_experiment_ids||[]),ids=[...new Set([...Object.keys(evidence),...Object.keys(monitoring)])];$('experiment-count').textContent=`${ids.length} tracked`;$('experiments').innerHTML=ids.length?ids.map(id=>{const ev=evidence[id]||{},m=monitoring[id]||{},status=ev.status||m.last_observed_status||'Discovered';return`<div class="experiment"><div class="exp-top"><span class="exp-id">${esc(id.replace('experiment-','').toUpperCase())}</span><span class="status ${done.has(id)?'done':''}">${esc(done.has(id)?'Reported':status)}</span></div><div class="exp-meta">Results ${esc(ev.results_status||'unknown')} · ${m.last_checked_at?'checked':'discovered'}</div></div>`}).join(''):'<div class="empty">No source evidence yet</div>';}
+  function renderAlerts(){const alerts=state.events.filter(e=>kind(e)==='alert').reverse();$('alert-count').textContent=`${alerts.length} sent`;$('alerts').innerHTML=alerts.length?alerts.slice(0,8).map(e=>`<div class="alert-item"><div class="alert-title">${esc(e.arguments?.title||'Operator alert')}</div><div class="alert-body">${esc(e.arguments?.body||e.outcome)}</div></div>`).join(''):'<div class="empty">No alerts delivered yet</div>';}
+  function render(){renderStats();renderActivity();renderTimeline();renderExperiments();renderAlerts();}
+  function add(event){state.events.push(event);if(state.events.length>500)state.events.shift();render();}
+  document.querySelectorAll('.filter').forEach(b=>b.onclick=()=>{document.querySelectorAll('.filter').forEach(x=>x.classList.remove('active'));b.classList.add('active');state.filter=b.dataset.filter;renderTimeline();});
+  fetch('/api/events').then(r=>r.json()).then(data=>{state.events=data.events||[];render();});
+  const stream=new EventSource('/api/stream');stream.onopen=()=>{$('connection').textContent='Live';};stream.onmessage=e=>add(JSON.parse(e.data));stream.onerror=()=>{$('connection').textContent='Reconnecting';};
+</script>
+</body>
+</html>

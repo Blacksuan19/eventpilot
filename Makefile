@@ -1,4 +1,4 @@
-.PHONY: check demo run
+.PHONY: check dashboard demo run
 
 check:
 	uv lock --check
@@ -13,3 +13,6 @@ demo:
 
 run:
 	uv run eventpilot run
+
+dashboard:
+	uv run eventpilot dashboard
