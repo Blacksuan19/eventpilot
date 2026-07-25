@@ -83,6 +83,17 @@ Run continuously with the configured LLM and mocked Foundry API:
 uv run eventpilot run
 ```
 
+For a video-friendly live view, start the dashboard and open `http://localhost:8000`:
+
+```bash
+uv run eventpilot dashboard
+```
+
+The dashboard shows the current validated agent decision, its rationale and arguments, wait
+countdowns, experiment state, delivered alerts, and an expandable event timeline. It consumes the
+same typed events as the console reporter, so the presentation reflects the live agent rather than
+a separate scripted demonstration.
+
 Or run the same process with durable SQLite storage in Docker:
 
 ```bash
@@ -92,10 +103,21 @@ docker compose up --build
 Docker only starts and recovers the process. The agent's `wait` tool controls polling; Docker does
 not wake or schedule the graph.
 
+Agent decisions and tool executions remain available as structured JSON logs. They include the selected
+Pydantic action model, validated arguments, rationale, tool and cycle counters, wait duration, result
+summary, and resulting source state. The reporter is a protocol, so production tracing can replace
+the console output without changing agent behavior.
+
 For time-compressed Docker integration runs, set `EVENTPILOT_TIME_ACCELERATION` to a multiplier
 greater than `1`. The mock API and graph then share an accelerated hidden clock, while each wait
 only yields briefly in real time. The agent still chooses every polling interval without seeing the
 fixture durations or acceleration factor.
+
+Docker defaults this demo to `3600`, so one agent-selected second advances the mock Foundry clock
+by one hour. Active monitoring waits are physically capped at five seconds so experiment progress
+stays visible during the demo. Once discovery finds no remaining work, the process honors the full
+agent-selected idle interval and visibly stops polling. Configure the active ceiling with
+`EVENTPILOT_MAX_PHYSICAL_WAIT_SECONDS`, or set acceleration to `1` for real wall-clock lifecycles.
 
 ## Quality gate
 
@@ -115,6 +137,7 @@ src/eventpilot/
 ├── sources/        # Pluggable tools, state, and platform policy
 ├── notifications/  # Alert-delivery providers
 ├── prompts/        # Source-neutral agent instructions
+├── dashboard/      # Live browser presentation of typed agent events
 └── cli.py          # Continuous and bounded runtime entrypoints
 ```
 

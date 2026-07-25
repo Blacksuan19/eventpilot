@@ -63,6 +63,23 @@ observes current platform state again.
 `finish_cycle` records a summary and routes to `END` after source policy approves it. The runtime
 immediately starts a fresh finite invocation on the same SQLite thread. It is not a shutdown tool.
 
+## Runtime reporting
+
+The graph emits typed `AgentDecisionEvent`, `ToolResultEvent`, and `CycleFinishedEvent` records
+through an `AgentReporter` protocol. Decision events include the concrete Pydantic action model,
+validated arguments, rationale, currently available tools, counters, and the source-state snapshot.
+Tool events add the result, outcome, and resulting state; wait events explicitly expose requested
+and elapsed seconds.
+
+The console reporter writes compact JSON lines suitable for Docker logs. The dashboard reporter
+retains the complete records and broadcasts them over server-sent events to a read-only browser UI
+with current activity, wait progress, source state, alerts, and an expandable timeline. Both
+reporters observe the same execution through a composite reporter; neither controls the graph.
+
+The console view summarizes large result
+collections and state maps while custom reporters receive the complete typed events and can forward
+them to tracing, metrics, or audit storage without changing the graph.
+
 ## Adaptyv plugin
 
 `FoundryToolAdapter` publishes and executes Foundry list, detail, update, and result operations.
