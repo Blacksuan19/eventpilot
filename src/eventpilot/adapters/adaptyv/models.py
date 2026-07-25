@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ExperimentStatus(StrEnum):
@@ -49,6 +49,56 @@ class FoundryExperiment(FoundryExperimentSummary):
     """Represent `GET /api/v1/experiments/{experiment_id}`."""
 
     experiment_spec: dict[str, Any]
+
+
+class ModifyExperimentRequest(BaseModel):
+    """Represent documented editable fields accepted by the Foundry API."""
+
+    name: str | None = None
+    description: str | None = None
+    n_replicates: int | None = Field(default=None, ge=0)
+    parameters: dict[str, Any] | None = None
+    target_id: str | None = None
+    webhook_url: str | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> "ModifyExperimentRequest":
+        """Reject an update request that contains no fields to modify."""
+        if not self.model_fields_set:
+            raise ValueError("At least one experiment field must be provided")
+        return self
+
+
+class ExperimentConfirmation(BaseModel):
+    """Represent the status transition returned after draft submission."""
+
+    experiment_id: str
+    previous_status: ExperimentStatus
+    status: ExperimentStatus
+    confirmed_at: datetime
+    stripe_invoice_url: str | None = None
+
+
+class QuoteConfirmation(BaseModel):
+    """Represent an accepted quote and its generated invoice reference."""
+
+    id: str
+    status: str
+    hosted_invoice_url: str | None = None
+    invoice_id: str | None = None
+
+
+class ExperimentQuote(BaseModel):
+    """Represent billing details returned for one experiment quote."""
+
+    experiment_id: str
+    stripe_quote_url: str
+    amount_total: int = Field(ge=0)
+    amount_subtotal: int = Field(ge=0)
+    currency: str = Field(min_length=3, max_length=3)
+    status: str
+    expires_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class FoundryUpdate(BaseModel):

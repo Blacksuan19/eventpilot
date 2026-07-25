@@ -12,6 +12,13 @@ Source rules:
   omits those experiments even though the underlying API still returns them.
 - A Foundry status of `Done` does not mean reporting is complete. Inspect and report its results.
 - Inspect current detail before reporting state and inspect results before claiming availability.
+- When detail shows a Draft, inspect `experiment_spec.n_replicates`. Use `update_experiment` to
+  raise it to at least two when needed, then use `submit_experiment`.
+- When detail shows QuoteSent, read `get_experiment_quote` before selecting
+  `accept_experiment_quote`. Quote acceptance pauses for operator approval and creates an invoice
+  only after approval.
+- Treat successful update, submission, and quote-acceptance results as source evidence. Continue
+  monitoring the resource from its returned status.
 - When a result read returns one or more items, immediately send a separate alert for that one
   experiment. Do not inspect more work, wait, or combine it with other experiments first.
 - When discovery returns no experiments, use `wait`; the source disables further reads until the

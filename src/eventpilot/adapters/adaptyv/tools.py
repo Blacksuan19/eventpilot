@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from eventpilot.adapters.adaptyv.client import FoundryClient
+from eventpilot.adapters.adaptyv.models import ModifyExperimentRequest
 from eventpilot.sources.base import SourceToolCall
 
 
@@ -38,6 +39,35 @@ class ListExperimentResults(SourceToolCall):
     experiment_id: str = Field(min_length=1, description="Foundry experiment identifier.")
 
 
+class UpdateExperiment(SourceToolCall):
+    """Modify fields on an editable Foundry experiment."""
+
+    tool: Literal["update_experiment"] = "update_experiment"
+    experiment_id: str = Field(min_length=1, description="Foundry experiment identifier.")
+    changes: ModifyExperimentRequest = Field(description="Editable fields and replacement values.")
+
+
+class SubmitExperiment(SourceToolCall):
+    """Submit a draft Foundry experiment for review and quote preparation."""
+
+    tool: Literal["submit_experiment"] = "submit_experiment"
+    experiment_id: str = Field(min_length=1, description="Draft experiment identifier.")
+
+
+class AcceptExperimentQuote(SourceToolCall):
+    """Accept a Foundry quote and create an invoice after operator approval."""
+
+    tool: Literal["accept_experiment_quote"] = "accept_experiment_quote"
+    experiment_id: str = Field(min_length=1, description="Quoted experiment identifier.")
+
+
+class GetExperimentQuote(SourceToolCall):
+    """Retrieve price and expiry details for a Foundry experiment quote."""
+
+    tool: Literal["get_experiment_quote"] = "get_experiment_quote"
+    experiment_id: str = Field(min_length=1, description="Quoted experiment identifier.")
+
+
 class FoundryToolAdapter:
     """Publish typed Foundry operations and execute them through a client transport."""
 
@@ -46,6 +76,10 @@ class FoundryToolAdapter:
         GetExperiment,
         ListExperimentUpdates,
         ListExperimentResults,
+        UpdateExperiment,
+        SubmitExperiment,
+        AcceptExperimentQuote,
+        GetExperimentQuote,
     )
 
     def __init__(self, client: FoundryClient) -> None:
@@ -81,4 +115,16 @@ class FoundryToolAdapter:
         if isinstance(action, ListExperimentResults):
             page = await self._client.list_experiment_results(action.experiment_id)
             return page.model_dump(mode="json")
+        if isinstance(action, UpdateExperiment):
+            experiment = await self._client.update_experiment(action.experiment_id, action.changes)
+            return experiment.model_dump(mode="json")
+        if isinstance(action, SubmitExperiment):
+            confirmation = await self._client.submit_experiment(action.experiment_id)
+            return confirmation.model_dump(mode="json")
+        if isinstance(action, AcceptExperimentQuote):
+            confirmation = await self._client.accept_experiment_quote(action.experiment_id)
+            return confirmation.model_dump(mode="json")
+        if isinstance(action, GetExperimentQuote):
+            quote = await self._client.get_experiment_quote(action.experiment_id)
+            return quote.model_dump(mode="json")
         raise TypeError(f"Unsupported Foundry adapter action: {type(action).__name__}")

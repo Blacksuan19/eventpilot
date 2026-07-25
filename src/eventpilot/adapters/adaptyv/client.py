@@ -3,8 +3,12 @@
 from typing import Protocol
 
 from eventpilot.adapters.adaptyv.models import (
+    ExperimentConfirmation,
     ExperimentPage,
+    ExperimentQuote,
     FoundryExperiment,
+    ModifyExperimentRequest,
+    QuoteConfirmation,
     ResultPage,
     UpdatePage,
 )
@@ -27,4 +31,22 @@ class FoundryClient(Protocol):
 
     async def list_experiment_results(self, experiment_id: str) -> ResultPage:
         """List available analysis results for one experiment."""
+        ...
+
+    async def update_experiment(
+        self, experiment_id: str, changes: ModifyExperimentRequest
+    ) -> FoundryExperiment:
+        """Modify an editable draft or in-review experiment."""
+        ...
+
+    async def submit_experiment(self, experiment_id: str) -> ExperimentConfirmation:
+        """Submit a draft experiment for review and quote preparation."""
+        ...
+
+    async def accept_experiment_quote(self, experiment_id: str) -> QuoteConfirmation:
+        """Accept an experiment quote and create its invoice."""
+        ...
+
+    async def get_experiment_quote(self, experiment_id: str) -> ExperimentQuote:
+        """Return the current price and expiry for an experiment quote."""
         ...

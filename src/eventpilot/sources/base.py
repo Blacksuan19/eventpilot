@@ -2,9 +2,11 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
+
+from eventpilot.core.approvals import ApprovalRequest
 
 
 class SourceToolCall(BaseModel):
@@ -93,4 +95,15 @@ class DataSource(Protocol):
 
     def record_finish(self, state: dict[str, Any]) -> dict[str, Any]:
         """Return source state prepared for the next fresh cycle."""
+        ...
+
+
+@runtime_checkable
+class ApprovalAwareDataSource(Protocol):
+    """Identify source actions that need a human decision before execution."""
+
+    def approval_request(
+        self, action: SourceToolCall, state: dict[str, Any]
+    ) -> ApprovalRequest | None:
+        """Return approval copy for a consequential action, when required."""
         ...

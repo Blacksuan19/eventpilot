@@ -3,7 +3,6 @@
 import argparse
 import asyncio
 from contextlib import suppress
-from pathlib import Path
 from time import monotonic, time
 
 import uvicorn
@@ -15,7 +14,12 @@ from eventpilot.core.agent_reasoning import (
     AutonomousReasoningEngine,
     InstructorAutonomousReasoningEngine,
 )
-from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
+from eventpilot.core.approvals import ApprovalDecision
+from eventpilot.core.autonomous import (
+    AgentRuntime,
+    AutonomousAgentState,
+    build_autonomous_graph,
+)
 from eventpilot.core.clock import AcceleratedClock
 from eventpilot.core.reporting import (
     AgentReporter,
@@ -24,7 +28,8 @@ from eventpilot.core.reporting import (
 )
 from eventpilot.dashboard.app import DashboardEventStore, create_dashboard_app
 from eventpilot.notifications.console import ConsoleNotificationSink
-from eventpilot.sources.adaptyv import AdaptyvDataSource, DemoAdaptyvReasoningEngine
+from eventpilot.sources.adaptyv import AdaptyvDataSource
+from eventpilot.sources.adaptyv_demo import DemoAdaptyvReasoningEngine
 from eventpilot.sources.base import DataSource
 
 
@@ -45,12 +50,14 @@ def _build_reasoning_engine(
     )
 
 
-async def run_agent(
-    *, max_cycles: int | None = None, reporter: AgentReporter | None = None
-) -> None:
-    """Run the autonomous supervisor continuously or for a bounded local demonstration."""
-    settings = get_settings()
-    settings.database_path.parent.mkdir(parents=True, exist_ok=True)
+def _create_runtime(
+    settings: Settings,
+    checkpointer: AsyncSqliteSaver,
+    *,
+    max_cycles: int | None = None,
+    reporter: AgentReporter | None = None,
+) -> AgentRuntime:
+    """Build one graph runtime around shared durable checkpoint infrastructure."""
     max_tool_calls_per_cycle = 12 if max_cycles is not None else 32
     accelerated_clock = (
         AcceleratedClock(
@@ -65,21 +72,33 @@ async def run_agent(
     agent = _build_reasoning_engine(
         settings, source, max_tool_calls_per_cycle=max_tool_calls_per_cycle
     )
+    graph = build_autonomous_graph(
+        agent,
+        source,
+        ConsoleNotificationSink(),
+        destination=settings.notification_destination,
+        checkpointer=checkpointer,
+        sleep=accelerated_clock.sleep if accelerated_clock else asyncio.sleep,
+        idle_sleep=(accelerated_clock.sleep_unbounded if accelerated_clock else asyncio.sleep),
+        clock=accelerated_clock or time,
+        max_wait_seconds=(2 if max_cycles is not None and not accelerated_clock else None),
+        max_tool_calls_per_cycle=max_tool_calls_per_cycle,
+        reporter=reporter,
+    )
+    return AgentRuntime(
+        graph,
+        automatic_approval=(ApprovalDecision.APPROVED if max_cycles is not None else None),
+    )
+
+
+async def run_agent(
+    *, max_cycles: int | None = None, reporter: AgentReporter | None = None
+) -> None:
+    """Run the autonomous supervisor continuously or for a bounded local demonstration."""
+    settings = get_settings()
+    settings.database_path.parent.mkdir(parents=True, exist_ok=True)
     async with AsyncSqliteSaver.from_conn_string(str(settings.database_path)) as checkpointer:
-        graph = build_autonomous_graph(
-            agent,
-            source,
-            ConsoleNotificationSink(),
-            destination=settings.notification_destination,
-            checkpointer=checkpointer,
-            sleep=accelerated_clock.sleep if accelerated_clock else asyncio.sleep,
-            idle_sleep=(accelerated_clock.sleep_unbounded if accelerated_clock else asyncio.sleep),
-            clock=accelerated_clock or time,
-            max_wait_seconds=(2 if max_cycles is not None and not accelerated_clock else None),
-            max_tool_calls_per_cycle=max_tool_calls_per_cycle,
-            reporter=reporter,
-        )
-        runtime = AgentRuntime(graph)
+        runtime = _create_runtime(settings, checkpointer, max_cycles=max_cycles, reporter=reporter)
         print("EventPilot autonomous supervisor started")
         final = await runtime.run(max_cycles=max_cycles)
         if max_cycles is not None:
@@ -92,47 +111,55 @@ async def run_dashboard() -> None:
     store = DashboardEventStore(path=settings.database_path.with_suffix(".events.jsonl"))
     reporter = CompositeAgentReporter(ConsoleAgentReporter(), store)
     reset_lock = asyncio.Lock()
-    agent_task: asyncio.Task[None] | None = None
+    agent_task: asyncio.Task[AutonomousAgentState] | None = None
+    runtime: AgentRuntime | None = None
 
-    def start_agent() -> asyncio.Task[None]:
+    def start_agent(checkpointer: AsyncSqliteSaver) -> asyncio.Task[AutonomousAgentState]:
         """Start one supervisor task using the shared dashboard reporter."""
-        return asyncio.create_task(run_agent(reporter=reporter), name="eventpilot-agent")
+        nonlocal runtime
+        runtime = _create_runtime(settings, checkpointer, reporter=reporter)
+        return asyncio.create_task(runtime.run(), name="eventpilot-agent")
 
-    async def reset_agent() -> None:
+    async def reset_agent(checkpointer: AsyncSqliteSaver) -> None:
         """Cancel the supervisor, clear durable state, and start a fresh run."""
-        nonlocal agent_task
+        nonlocal agent_task, runtime
         async with reset_lock:
             if agent_task and not agent_task.done():
                 agent_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await agent_task
-            for checkpoint_file in (
-                settings.database_path,
-                Path(f"{settings.database_path}-shm"),
-                Path(f"{settings.database_path}-wal"),
-            ):
-                checkpoint_file.unlink(missing_ok=True)
+            await checkpointer.adelete_thread(AgentRuntime.thread_id)
             store.clear()
-            agent_task = start_agent()
+            agent_task = start_agent(checkpointer)
 
-    server = uvicorn.Server(
-        uvicorn.Config(
-            create_dashboard_app(store, reset_agent=reset_agent),
-            host=settings.dashboard_host,
-            port=settings.dashboard_port,
-            log_level="warning",
+    async def resolve_approval(approval_id: str, decision: ApprovalDecision) -> bool:
+        """Resume the current graph interrupt through the active runtime."""
+        return runtime is not None and await runtime.resolve_approval(approval_id, decision)
+
+    settings.database_path.parent.mkdir(parents=True, exist_ok=True)
+    async with AsyncSqliteSaver.from_conn_string(str(settings.database_path)) as checkpointer:
+        server = uvicorn.Server(
+            uvicorn.Config(
+                create_dashboard_app(
+                    store,
+                    reset_agent=lambda: reset_agent(checkpointer),
+                    resolve_approval=resolve_approval,
+                ),
+                host=settings.dashboard_host,
+                port=settings.dashboard_port,
+                log_level="warning",
+            )
         )
-    )
-    agent_task = start_agent()
-    try:
-        await server.serve()
-        if not agent_task.done():
-            agent_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await agent_task
-    finally:
-        if not agent_task.done():
-            agent_task.cancel()
+        agent_task = start_agent(checkpointer)
+        try:
+            await server.serve()
+            if not agent_task.done():
+                agent_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await agent_task
+        finally:
+            if not agent_task.done():
+                agent_task.cancel()
 
 
 def main() -> None:

@@ -29,11 +29,8 @@ from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
 from eventpilot.core.clock import AcceleratedClock
 from eventpilot.core.notifications import DeliveryResult, Notification
 from eventpilot.core.reporting import AgentDecisionEvent, AgentEvent, ToolResultEvent
-from eventpilot.sources.adaptyv import (
-    AdaptyvDataSource,
-    DemoAdaptyvReasoningEngine,
-    SelectObjective,
-)
+from eventpilot.sources.adaptyv import AdaptyvDataSource, SelectObjective
+from eventpilot.sources.adaptyv_demo import DemoAdaptyvReasoningEngine
 
 
 def tool_names(transcript: list[dict[str, Any]]) -> list[str]:
@@ -644,22 +641,6 @@ async def test_graph_requires_a_complete_monitoring_portfolio() -> None:
     assert "every active" in rejected["result"]["reason"]
     assert foundry.inspected_ids == [experiment_ids[1]]
     assert len(sink.notifications) == 2
-
-
-def test_legacy_single_experiment_objective_can_expand() -> None:
-    """Expose objective selection when persisted monitoring state omits discovered work."""
-    source = AdaptyvDataSource(MockFoundryClient(load_scenarios()))
-    state = source.initial_state()
-    state.update(
-        phase="active",
-        objective={"kind": "monitor", "experiment_ids": ["experiment-egfr"]},
-        evidence={
-            "experiment-egfr": {"status": "InQueue"},
-            "experiment-kras": {"status": "InProduction"},
-        },
-    )
-
-    assert "select_objective" in source.available_tools(state)
 
 
 async def test_graph_accepts_multi_experiment_monitor_objective() -> None:

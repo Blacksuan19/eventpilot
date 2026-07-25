@@ -47,6 +47,31 @@ class ToolResultEvent(AgentEvent):
     elapsed_wait_seconds: float | None = Field(default=None, ge=0)
 
 
+class ApprovalRequestedEvent(AgentEvent):
+    """Describe a source action suspended for an operator decision."""
+
+    event: Literal["approval_requested"] = "approval_requested"
+    approval_id: str
+    title: str
+    body: str
+    resource_ids: list[str]
+    tool: str
+    action_model: str
+    arguments: dict[str, Any]
+    delivery: dict[str, Any]
+
+
+class ApprovalResolvedEvent(AgentEvent):
+    """Record the operator decision that resumed a suspended source action."""
+
+    event: Literal["approval_resolved"] = "approval_resolved"
+    approval_id: str
+    decision: Literal["approved", "rejected"]
+    tool: str
+    action_model: str
+    arguments: dict[str, Any]
+
+
 class CycleFinishedEvent(AgentEvent):
     """Describe why a finite graph cycle returned control to the runtime."""
 

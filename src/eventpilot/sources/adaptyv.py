@@ -11,12 +11,16 @@ from eventpilot.adapters.adaptyv import (
     FoundryToolAdapter,
 )
 from eventpilot.adapters.adaptyv.tools import (
+    AcceptExperimentQuote,
     GetExperiment,
+    GetExperimentQuote,
     ListExperimentResults,
     ListExperiments,
     ListExperimentUpdates,
+    SubmitExperiment,
+    UpdateExperiment,
 )
-from eventpilot.core.agent_reasoning import AgentTurn, FinishCycle, SendAlert, Wait
+from eventpilot.core.approvals import ApprovalRequest
 from eventpilot.sources.base import SourceContext, SourceExecution, SourceToolCall
 
 ObjectiveKind = Literal["monitor", "report_results", "status_digest", "investigate_incident"]
@@ -81,8 +85,22 @@ class AdaptyvDataSource:
                 "list_experiment_results",
             },
         }[phase]
-        if phase == "active" and self._objective_omits_discovered_work(state):
-            tools.add("select_objective")
+        if phase == "active":
+            statuses = {
+                experiment_id: evidence.get("status")
+                for experiment_id, evidence in state.get("evidence", {}).items()
+                if evidence.get("detail_observed_at") is not None
+            }
+            if ExperimentStatus.DRAFT in statuses.values():
+                tools.update({"update_experiment", "submit_experiment"})
+            if ExperimentStatus.QUOTE_SENT in statuses.values():
+                tools.add("get_experiment_quote")
+                if any(
+                    evidence.get("quote_observed_at") is not None
+                    for evidence in state.get("evidence", {}).values()
+                    if evidence.get("status") == ExperimentStatus.QUOTE_SENT
+                ):
+                    tools.add("accept_experiment_quote")
         return tools
 
     def is_idle(self, state: dict[str, Any]) -> bool:
@@ -108,7 +126,37 @@ class AdaptyvDataSource:
             return await self._list_experiment_updates(action, context)
         if isinstance(action, ListExperimentResults):
             return await self._list_experiment_results(action, context)
+        if isinstance(action, UpdateExperiment):
+            return await self._update_experiment(action, context)
+        if isinstance(action, SubmitExperiment):
+            return await self._submit_experiment(action, context)
+        if isinstance(action, AcceptExperimentQuote):
+            return await self._accept_experiment_quote(action, context)
+        if isinstance(action, GetExperimentQuote):
+            return await self._get_experiment_quote(action, context)
         raise TypeError(f"Unsupported {self.name} action: {type(action).__name__}")
+
+    def approval_request(
+        self, action: SourceToolCall, state: dict[str, Any]
+    ) -> ApprovalRequest | None:
+        """Require operator confirmation before accepting a quote and creating an invoice."""
+        if not isinstance(action, AcceptExperimentQuote):
+            return None
+        evidence = state.get("evidence", {}).get(action.experiment_id, {})
+        quote = evidence.get("quote", {})
+        amount = quote.get("amount_total")
+        currency = str(quote.get("currency", "")).upper()
+        formatted_amount = (
+            f"{currency} {amount / 100:,.2f}" if isinstance(amount, int) else "unknown amount"
+        )
+        return ApprovalRequest(
+            title=f"Approve quote for {action.experiment_id}",
+            body=(
+                f"Foundry quoted {formatted_amount} for {action.experiment_id}. "
+                "Approval will accept the quote and create an invoice."
+            ),
+            resource_ids=(action.experiment_id,),
+        )
 
     async def _list_experiments(
         self, action: ListExperiments, context: SourceContext
@@ -201,10 +249,117 @@ class AdaptyvDataSource:
             status=result["status"],
             results_status=result["results_status"],
             observed_at=now,
+            detail_observed_at=now,
+            experiment_spec=result.get("experiment_spec", {}),
         )
         state.setdefault("monitoring", {}).setdefault(action.experiment_id, {}).update(
             last_checked_at=now,
             last_observed_status=result["status"],
+        )
+        self._record_inspection(state, action.experiment_id)
+        return SourceExecution(result=result, state=state)
+
+    async def _update_experiment(
+        self, action: UpdateExperiment, context: SourceContext
+    ) -> SourceExecution:
+        """Modify an editable in-scope experiment and persist the returned configuration."""
+        rejection = self._scope_rejection(action.experiment_id, context.state)
+        evidence = context.state.get("evidence", {}).get(action.experiment_id, {})
+        if rejection:
+            return SourceExecution(result=rejection, state=context.state)
+        if evidence.get("status") not in {
+            ExperimentStatus.DRAFT,
+            ExperimentStatus.IN_REVIEW,
+        }:
+            return SourceExecution(
+                result={"status": "rejected", "reason": "Experiment is not editable."},
+                state=context.state,
+            )
+        result = await self._adapter.execute(action)
+        state = deepcopy(context.state)
+        state.setdefault("evidence", {}).setdefault(action.experiment_id, {}).update(
+            status=result["status"],
+            experiment_spec=result.get("experiment_spec", {}),
+            detail_observed_at=context.clock(),
+            last_action="update_experiment",
+        )
+        self._record_inspection(state, action.experiment_id)
+        return SourceExecution(result=result, state=state)
+
+    async def _submit_experiment(
+        self, action: SubmitExperiment, context: SourceContext
+    ) -> SourceExecution:
+        """Submit a valid in-scope draft and persist its confirmed status transition."""
+        rejection = self._scope_rejection(action.experiment_id, context.state)
+        evidence = context.state.get("evidence", {}).get(action.experiment_id, {})
+        if rejection:
+            return SourceExecution(result=rejection, state=context.state)
+        if evidence.get("status") != ExperimentStatus.DRAFT:
+            return SourceExecution(
+                result={"status": "rejected", "reason": "Experiment is not a draft."},
+                state=context.state,
+            )
+        replicates = evidence.get("experiment_spec", {}).get("n_replicates", 0)
+        if replicates < 2:
+            return SourceExecution(
+                result={
+                    "status": "rejected",
+                    "reason": "Draft policy requires at least two replicates before submission.",
+                },
+                state=context.state,
+            )
+        result = await self._adapter.execute(action)
+        state = deepcopy(context.state)
+        state.setdefault("evidence", {}).setdefault(action.experiment_id, {}).update(
+            status=result["status"],
+            observed_at=context.clock(),
+            last_action="submit_experiment",
+        )
+        self._record_inspection(state, action.experiment_id)
+        return SourceExecution(result=result, state=state)
+
+    async def _accept_experiment_quote(
+        self, action: AcceptExperimentQuote, context: SourceContext
+    ) -> SourceExecution:
+        """Accept an approved in-scope quote and persist its invoice evidence."""
+        rejection = self._scope_rejection(action.experiment_id, context.state)
+        evidence = context.state.get("evidence", {}).get(action.experiment_id, {})
+        if rejection:
+            return SourceExecution(result=rejection, state=context.state)
+        if evidence.get("status") != ExperimentStatus.QUOTE_SENT:
+            return SourceExecution(
+                result={"status": "rejected", "reason": "Experiment has no pending quote."},
+                state=context.state,
+            )
+        result = await self._adapter.execute(action)
+        state = deepcopy(context.state)
+        state.setdefault("evidence", {}).setdefault(action.experiment_id, {}).update(
+            status=ExperimentStatus.WAITING_FOR_MATERIALS,
+            observed_at=context.clock(),
+            last_action="accept_experiment_quote",
+            invoice_id=result.get("invoice_id"),
+        )
+        self._record_inspection(state, action.experiment_id)
+        return SourceExecution(result=result, state=state)
+
+    async def _get_experiment_quote(
+        self, action: GetExperimentQuote, context: SourceContext
+    ) -> SourceExecution:
+        """Read quote cost and expiry before exposing its consequential acceptance tool."""
+        rejection = self._scope_rejection(action.experiment_id, context.state)
+        evidence = context.state.get("evidence", {}).get(action.experiment_id, {})
+        if rejection:
+            return SourceExecution(result=rejection, state=context.state)
+        if evidence.get("status") != ExperimentStatus.QUOTE_SENT:
+            return SourceExecution(
+                result={"status": "rejected", "reason": "Experiment has no pending quote."},
+                state=context.state,
+            )
+        result = await self._adapter.execute(action)
+        state = deepcopy(context.state)
+        state.setdefault("evidence", {}).setdefault(action.experiment_id, {}).update(
+            quote=result,
+            quote_observed_at=context.clock(),
         )
         self._record_inspection(state, action.experiment_id)
         return SourceExecution(result=result, state=state)
@@ -271,6 +426,13 @@ class AdaptyvDataSource:
         pending = state.get("pending_result_alert_id")
         if pending:
             return f"Result evidence for {pending} must be reported before waiting."
+        for experiment_id, evidence in state.get("evidence", {}).items():
+            if evidence.get("detail_observed_at") is None:
+                continue
+            if evidence.get("status") == ExperimentStatus.DRAFT:
+                return f"Draft {experiment_id} must be prepared and submitted before waiting."
+            if evidence.get("status") == ExperimentStatus.QUOTE_SENT:
+                return f"Quote {experiment_id} must be reviewed for approval before waiting."
         return None
 
     def validate_alert(self, resource_ids: list[str], state: dict[str, Any]) -> str | None:
@@ -415,152 +577,3 @@ class AdaptyvDataSource:
             )
             for resource_id in resource_ids
         }
-
-    @staticmethod
-    def _objective_omits_discovered_work(state: dict[str, Any]) -> bool:
-        """Detect legacy or incomplete monitor scopes that need portfolio expansion."""
-        objective = state.get("objective") or {}
-        if objective.get("kind") != "monitor":
-            return False
-        completed = set(state.get("completed_experiment_ids", []))
-        discovered = {
-            experiment_id
-            for experiment_id, evidence in state.get("evidence", {}).items()
-            if experiment_id not in completed
-            and evidence.get("status") != ExperimentStatus.CANCELED
-        }
-        return not discovered.issubset(set(objective.get("experiment_ids", [])))
-
-
-class DemoAdaptyvReasoningEngine:
-    """Exercise the Adaptyv plugin deterministically without LLM credentials."""
-
-    async def decide(
-        self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
-    ) -> AgentTurn:
-        """Choose a representative Foundry trajectory using only observed tool results."""
-        if not transcript:
-            return self._discovery_turn()
-
-        latest = transcript[-1]
-        tool = latest["tool"]
-        if tool == "list_experiments":
-            items = latest["result"]["items"]
-            active = [
-                item
-                for item in items
-                if item["id"] not in source_state.get("completed_experiment_ids", [])
-                if item["status"] != ExperimentStatus.CANCELED
-            ]
-            if not active:
-                return AgentTurn(
-                    rationale="No active experiment currently requires attention.",
-                    action=Wait(seconds=60, reason="Back off before discovering work again."),
-                )
-            return AgentTurn(
-                rationale=(
-                    "Monitor the discovered experiment portfolio without blocking on one run."
-                ),
-                action=SelectObjective(
-                    kind="monitor",
-                    experiment_ids=[item["id"] for item in active],
-                    summary="Interleave monitoring across all active experiments.",
-                ),
-            )
-
-        if tool == "select_objective":
-            experiment_id = latest["result"]["experiment_ids"][0]
-            return AgentTurn(
-                rationale="Inspect the experiment selected for this cycle.",
-                action=GetExperiment(experiment_id=experiment_id),
-            )
-
-        if tool == "wait":
-            candidates = source_state.get("next_experiment_candidates", [])
-            experiment_id = (
-                candidates[0] if candidates else self._last_focused_experiment_id(transcript)
-            )
-            if experiment_id:
-                return AgentTurn(
-                    rationale="The polling interval elapsed; refresh the active experiment.",
-                    action=GetExperiment(experiment_id=experiment_id),
-                )
-            return self._discovery_turn()
-
-        if tool == "get_experiment":
-            experiment = latest["result"]
-            experiment_id = experiment["id"]
-            if experiment["results_status"] in {"Partial", "All"}:
-                return AgentTurn(
-                    rationale="Results are available and must be inspected before alerting.",
-                    action=ListExperimentResults(experiment_id=experiment_id),
-                )
-            if experiment["status"] == ExperimentStatus.DONE:
-                return AgentTurn(
-                    rationale="The experiment is done but results are delayed; inspect updates.",
-                    action=ListExperimentUpdates(experiment_id=experiment_id),
-                )
-            return AgentTurn(
-                rationale=f"The experiment remains active in {experiment['status']}.",
-                action=Wait(seconds=1, reason="Poll this active experiment again."),
-            )
-
-        if tool == "list_experiment_updates":
-            experiment_id = latest["call"]["experiment_id"]
-            return AgentTurn(
-                rationale="The terminal experiment has no results yet and needs another poll.",
-                action=Wait(seconds=5, reason=f"Wait for results on {experiment_id}."),
-            )
-
-        if tool == "list_experiment_results":
-            experiment_id = latest["call"]["experiment_id"]
-            return AgentTurn(
-                rationale="The inspected result payload is ready for an operator alert.",
-                action=SendAlert(
-                    resource_ids=[experiment_id],
-                    title=f"Experiment {experiment_id} results are ready",
-                    body=f"Foundry returned {latest['result']['count']} available result(s).",
-                ),
-            )
-
-        if tool == "send_alert":
-            completed = set(source_state.get("completed_experiment_ids", []))
-            evidence = source_state.get("evidence", {})
-            objective = source_state.get("objective") or {}
-            next_ready = next(
-                (
-                    experiment_id
-                    for experiment_id in objective.get("experiment_ids", [])
-                    if experiment_id not in completed
-                    and evidence.get(experiment_id, {}).get("status") == ExperimentStatus.DONE
-                    and evidence.get(experiment_id, {}).get("results_status") in {"Partial", "All"}
-                ),
-                None,
-            )
-            if next_ready:
-                return AgentTurn(
-                    rationale="Another experiment has ready results in the current portfolio.",
-                    action=ListExperimentResults(experiment_id=next_ready),
-                )
-            return AgentTurn(
-                rationale="No other portfolio result is immediately reportable.",
-                action=FinishCycle(summary="Reported all currently ready results."),
-            )
-
-        return self._discovery_turn()
-
-    @staticmethod
-    def _discovery_turn() -> AgentTurn:
-        """Return the first Foundry discovery action for a fresh cycle."""
-        return AgentTurn(
-            rationale="Discover current experiments before selecting an objective.",
-            action=ListExperiments(),
-        )
-
-    @staticmethod
-    def _last_focused_experiment_id(transcript: list[dict[str, Any]]) -> str | None:
-        """Return the experiment most recently inspected in this cycle."""
-        for entry in reversed(transcript):
-            if entry["tool"] == "get_experiment":
-                return str(entry["result"]["id"])
-        return None
