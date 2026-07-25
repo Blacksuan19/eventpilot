@@ -1,7 +1,9 @@
 """Provide a fixture-backed mock of the Foundry API."""
 
 import json
+from collections.abc import Callable
 from importlib.resources import files
+from time import monotonic
 from typing import Any, Self
 
 from pydantic import BaseModel, Field, model_validator
@@ -19,14 +21,20 @@ from eventpilot.adapters.adaptyv import (
 )
 
 
+class LifecycleStep(BaseModel):
+    """Keep one hidden mock status active for a configured number of seconds."""
+
+    status: ExperimentStatus
+    duration_seconds: int = Field(ge=0)
+
+
 class ExperimentScenario(BaseModel):
     """Describe one experiment and the API snapshots it exposes over time."""
 
     experiment: FoundryExperiment
-    lifecycle: list[ExperimentStatus] = Field(min_length=1)
+    lifecycle: list[LifecycleStep] = Field(min_length=1)
     updates: list[FoundryUpdate] = Field(default_factory=list)
     results: list[FoundryResult] = Field(default_factory=list)
-    result_delay_reads: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_related_records(self) -> Self:
@@ -36,20 +44,28 @@ class ExperimentScenario(BaseModel):
             raise ValueError("Every update must belong to its scenario experiment")
         if any(result.experiment_id != experiment_id for result in self.results):
             raise ValueError("Every result must belong to its scenario experiment")
+        if self.lifecycle[-1].status != ExperimentStatus.DONE:
+            raise ValueError("Every mock lifecycle must end in Done")
         return self
 
 
 class MockFoundryClient:
     """Serve any fixture collection through the same API protocol used by the agent."""
 
-    def __init__(self, scenarios: list[ExperimentScenario]) -> None:
-        """Create independent lifecycle cursors for a non-empty experiment collection."""
+    def __init__(
+        self,
+        scenarios: list[ExperimentScenario],
+        *,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        """Start every fixture lifecycle against an injectable monotonic clock."""
         if not scenarios:
             raise ValueError("At least one mock experiment is required")
         self._scenarios = {scenario.experiment.id: scenario for scenario in scenarios}
         if len(self._scenarios) != len(scenarios):
             raise ValueError("Mock experiment identifiers must be unique")
-        self._indexes = dict.fromkeys(self._scenarios, 0)
+        self._clock = clock
+        self._started_at = clock()
         self.inspected_ids: list[str] = []
 
     @classmethod
@@ -69,10 +85,9 @@ class MockFoundryClient:
         return ExperimentPage(items=items, total=len(summaries), count=len(items), offset=offset)
 
     async def get_experiment(self, experiment_id: str) -> FoundryExperiment:
-        """Return the selected experiment and advance only its external lifecycle."""
+        """Return the selected experiment without changing its time-based lifecycle."""
         experiment = self._current_experiment(experiment_id)
         self.inspected_ids.append(experiment_id)
-        self._indexes[experiment_id] += 1
         return experiment
 
     async def list_experiment_updates(self, experiment_id: str) -> UpdatePage:
@@ -93,15 +108,18 @@ class MockFoundryClient:
         return ResultPage(items=items, total=len(items), count=len(items), offset=0)
 
     def _current_experiment(self, experiment_id: str) -> FoundryExperiment:
-        """Render current status and result availability over immutable fixture details."""
+        """Render status from hidden elapsed time over immutable fixture details."""
         scenario = self._scenario(experiment_id)
-        index = self._indexes[experiment_id]
-        status = scenario.lifecycle[min(index, len(scenario.lifecycle) - 1)]
-        results_available = (
-            bool(scenario.results)
-            and status == ExperimentStatus.DONE
-            and index >= scenario.result_delay_reads
-        )
+        elapsed = self._clock() - self._started_at
+        remaining = elapsed
+        status = scenario.lifecycle[-1].status
+        for step in scenario.lifecycle:
+            status = step.status
+            if remaining < step.duration_seconds:
+                break
+            remaining -= step.duration_seconds
+        total_duration = sum(step.duration_seconds for step in scenario.lifecycle)
+        results_available = bool(scenario.results) and elapsed >= total_duration
         return scenario.experiment.model_copy(
             update={
                 "status": status,

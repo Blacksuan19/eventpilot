@@ -11,7 +11,11 @@
       "results_status": "None",
       "experiment_url": "https://foundry.example/experiments/experiment-egfr"
     },
-    "lifecycle": ["InQueue", "DataAnalysis", "Done"],
+    "lifecycle": [
+      {"status": "InQueue", "duration_seconds": 21600},
+      {"status": "DataAnalysis", "duration_seconds": 10800},
+      {"status": "Done", "duration_seconds": 1800}
+    ],
     "updates": [
       {
         "id": "update-egfr-processing",
@@ -46,7 +50,11 @@
       "results_status": "None",
       "experiment_url": "https://foundry.example/experiments/experiment-kras"
     },
-    "lifecycle": ["InProduction", "InReview", "Done"],
+    "lifecycle": [
+      {"status": "InProduction", "duration_seconds": 43200},
+      {"status": "InReview", "duration_seconds": 14400},
+      {"status": "Done", "duration_seconds": 1800}
+    ],
     "updates": [
       {
         "id": "update-kras-review",
@@ -81,7 +89,12 @@
       "results_status": "None",
       "experiment_url": "https://foundry.example/experiments/experiment-her2"
     },
-    "lifecycle": ["WaitingForMaterials", "InQueue", "InProduction", "Done"],
+    "lifecycle": [
+      {"status": "WaitingForMaterials", "duration_seconds": 172800},
+      {"status": "InQueue", "duration_seconds": 21600},
+      {"status": "InProduction", "duration_seconds": 86400},
+      {"status": "Done", "duration_seconds": 3600}
+    ],
     "updates": [
       {
         "id": "update-her2-materials",
@@ -101,6 +114,207 @@
         "summary": {"top_kd_nm": 2.7},
         "metadata": {},
         "data_package_url": "https://foundry.example/results/experiment-her2.zip"
+      }
+    ]
+  },
+  {
+    "experiment": {
+      "id": "experiment-tp53",
+      "code": "ORG-001-004",
+      "name": "TP53 Stability Assay",
+      "status": "Draft",
+      "experiment_type": "stability",
+      "experiment_spec": {"experiment_type": "stability", "method": "dsc"},
+      "created_at": "2026-07-04T10:00:00Z",
+      "results_status": "None",
+      "experiment_url": "https://foundry.example/experiments/experiment-tp53"
+    },
+    "lifecycle": [
+      {"status": "Draft", "duration_seconds": 86400},
+      {"status": "WaitingForConfirmation", "duration_seconds": 172800},
+      {"status": "InQueue", "duration_seconds": 43200},
+      {"status": "DataAnalysis", "duration_seconds": 21600},
+      {"status": "Done", "duration_seconds": 3600}
+    ],
+    "updates": [
+      {
+        "id": "update-tp53-confirmed",
+        "experiment_id": "experiment-tp53",
+        "experiment_code": "ORG-001-004",
+        "name": "TP53 assay parameters confirmed",
+        "timestamp": "2026-07-25T08:45:00Z"
+      }
+    ],
+    "results": [
+      {
+        "id": "result-tp53",
+        "title": "TP53 thermal stability",
+        "experiment_id": "experiment-tp53",
+        "result_type": "stability",
+        "created_at": "2026-07-25T09:45:00Z",
+        "summary": {"melting_temperature_c": 61.8},
+        "metadata": {},
+        "data_package_url": "https://foundry.example/results/experiment-tp53.zip"
+      }
+    ]
+  },
+  {
+    "experiment": {
+      "id": "experiment-il6",
+      "code": "ORG-001-005",
+      "name": "IL-6 Quantification Panel",
+      "status": "QuoteSent",
+      "experiment_type": "quantification",
+      "experiment_spec": {"experiment_type": "quantification", "method": "elisa"},
+      "created_at": "2026-07-05T10:00:00Z",
+      "results_status": "None",
+      "experiment_url": "https://foundry.example/experiments/experiment-il6"
+    },
+    "lifecycle": [
+      {"status": "QuoteSent", "duration_seconds": 86400},
+      {"status": "WaitingForMaterials", "duration_seconds": 259200},
+      {"status": "InProduction", "duration_seconds": 86400},
+      {"status": "InReview", "duration_seconds": 21600},
+      {"status": "Done", "duration_seconds": 3600}
+    ],
+    "updates": [
+      {
+        "id": "update-il6-production",
+        "experiment_id": "experiment-il6",
+        "experiment_code": "ORG-001-005",
+        "name": "IL-6 samples entered production",
+        "timestamp": "2026-07-25T09:00:00Z"
+      }
+    ],
+    "results": [
+      {
+        "id": "result-il6",
+        "title": "IL-6 concentration panel",
+        "experiment_id": "experiment-il6",
+        "result_type": "quantification",
+        "created_at": "2026-07-25T10:00:00Z",
+        "summary": {"median_concentration_pg_ml": 42.3},
+        "metadata": {},
+        "data_package_url": "https://foundry.example/results/experiment-il6.zip"
+      }
+    ]
+  },
+  {
+    "experiment": {
+      "id": "experiment-pcsk9",
+      "code": "ORG-001-006",
+      "name": "PCSK9 Expression Optimization",
+      "status": "InQueue",
+      "experiment_type": "expression",
+      "experiment_spec": {"experiment_type": "expression", "host": "cho"},
+      "created_at": "2026-07-06T10:00:00Z",
+      "results_status": "None",
+      "experiment_url": "https://foundry.example/experiments/experiment-pcsk9"
+    },
+    "lifecycle": [
+      {"status": "InQueue", "duration_seconds": 43200},
+      {"status": "InProduction", "duration_seconds": 172800},
+      {"status": "DataAnalysis", "duration_seconds": 43200},
+      {"status": "InReview", "duration_seconds": 21600},
+      {"status": "Done", "duration_seconds": 3600}
+    ],
+    "updates": [
+      {
+        "id": "update-pcsk9-analysis",
+        "experiment_id": "experiment-pcsk9",
+        "experiment_code": "ORG-001-006",
+        "name": "PCSK9 expression data under analysis",
+        "timestamp": "2026-07-25T09:15:00Z"
+      }
+    ],
+    "results": [
+      {
+        "id": "result-pcsk9",
+        "title": "PCSK9 expression optimization",
+        "experiment_id": "experiment-pcsk9",
+        "result_type": "expression",
+        "created_at": "2026-07-25T10:15:00Z",
+        "summary": {"best_condition": "C7", "yield_mg_l": 126.5},
+        "metadata": {},
+        "data_package_url": "https://foundry.example/results/experiment-pcsk9.zip"
+      }
+    ]
+  },
+  {
+    "experiment": {
+      "id": "experiment-vegfa",
+      "code": "ORG-001-007",
+      "name": "VEGFA Binding Kinetics",
+      "status": "InProduction",
+      "experiment_type": "kinetics",
+      "experiment_spec": {"experiment_type": "kinetics", "method": "spr"},
+      "created_at": "2026-07-07T10:00:00Z",
+      "results_status": "None",
+      "experiment_url": "https://foundry.example/experiments/experiment-vegfa"
+    },
+    "lifecycle": [
+      {"status": "InProduction", "duration_seconds": 64800},
+      {"status": "DataAnalysis", "duration_seconds": 21600},
+      {"status": "Done", "duration_seconds": 1800}
+    ],
+    "updates": [
+      {
+        "id": "update-vegfa-analysis",
+        "experiment_id": "experiment-vegfa",
+        "experiment_code": "ORG-001-007",
+        "name": "VEGFA kinetic curves generated",
+        "timestamp": "2026-07-25T09:30:00Z"
+      }
+    ],
+    "results": [
+      {
+        "id": "result-vegfa",
+        "title": "VEGFA binding kinetics",
+        "experiment_id": "experiment-vegfa",
+        "result_type": "kinetics",
+        "created_at": "2026-07-25T10:30:00Z",
+        "summary": {"kd_nm": 4.1, "kon_per_ms": 180000},
+        "metadata": {},
+        "data_package_url": "https://foundry.example/results/experiment-vegfa.zip"
+      }
+    ]
+  },
+  {
+    "experiment": {
+      "id": "experiment-alk",
+      "code": "ORG-001-008",
+      "name": "ALK Selectivity Screen",
+      "status": "DataAnalysis",
+      "experiment_type": "screening",
+      "experiment_spec": {"experiment_type": "screening", "method": "dose_response"},
+      "created_at": "2026-07-08T10:00:00Z",
+      "results_status": "None",
+      "experiment_url": "https://foundry.example/experiments/experiment-alk"
+    },
+    "lifecycle": [
+      {"status": "DataAnalysis", "duration_seconds": 28800},
+      {"status": "InReview", "duration_seconds": 14400},
+      {"status": "Done", "duration_seconds": 1800}
+    ],
+    "updates": [
+      {
+        "id": "update-alk-review",
+        "experiment_id": "experiment-alk",
+        "experiment_code": "ORG-001-008",
+        "name": "ALK selectivity results entered review",
+        "timestamp": "2026-07-25T09:45:00Z"
+      }
+    ],
+    "results": [
+      {
+        "id": "result-alk",
+        "title": "ALK selectivity screen",
+        "experiment_id": "experiment-alk",
+        "result_type": "screening",
+        "created_at": "2026-07-25T10:45:00Z",
+        "summary": {"selective_compounds": 7, "total_compounds": 96},
+        "metadata": {},
+        "data_package_url": "https://foundry.example/results/experiment-alk.zip"
       }
     ]
   }
