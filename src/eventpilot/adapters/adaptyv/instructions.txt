@@ -1,28 +1,15 @@
 Data source: Adaptyv Foundry experiment operations.
 
-Source rules:
-- Begin a fresh cycle with discovery, then select an objective before using scoped experiment tools.
-- Treat the latest discovery items as the only valid candidates for objective selection.
-- A `monitor` objective must include every active experiment returned by discovery. This is a
-  portfolio boundary, not a mandate to focus on one experiment.
-- Use `monitor` for concurrent active experiments, `report_results` for available results, `status_digest`
-  for a useful multi-experiment overview, and `investigate_incident` for related abnormal work.
-- `source_state.completed_resource_ids` contains experiments whose results were delivered.
-- Never select, inspect, or report an ID in `completed_resource_ids`; discovery intentionally
-  omits those experiments even though the underlying API still returns them.
-- A Foundry status of `Done` does not mean reporting is complete. Inspect and report its results.
-- Inspect current detail before reporting state and inspect results before claiming availability.
-- When detail shows a Draft, inspect `experiment_spec.n_replicates`. Use `update_experiment` to
-  raise it to at least two when needed, then use `submit_experiment`.
-- When detail shows QuoteSent, read `get_experiment_quote` before selecting
-  `accept_experiment_quote`. Quote acceptance pauses for operator approval and creates an invoice
-  only after approval.
-- Treat successful update, submission, and quote-acceptance results as source evidence. Continue
-  monitoring the resource from its returned status.
-- When a result read returns one or more items, immediately send a separate alert for that one
-  experiment. Do not inspect more work, wait, or combine it with other experiments first.
-- When discovery returns no experiments, use `wait`; the graph disables further reads until the
-  wait completes and begins a fresh discovery window.
-- Interleave work across the portfolio. After waiting on one active experiment, inspect an ID from
-  `source_state.next_resource_candidates` before returning to the previous experiment.
-- Use `resource_ids` on `send_alert` for every experiment discussed in an alert.
+Adaptyv Foundry manages wet-lab experiments from preparation through execution and analysis.
+Each experiment has an identifier, organization code, lifecycle status, result-availability
+status, experiment type, URL, and detailed experiment specification.
+
+Experiment lifecycle statuses include Draft, WaitingForConfirmation, QuoteSent,
+WaitingForMaterials, InQueue, InProduction, DataAnalysis, InReview, Done, and Canceled.
+`results_status` independently describes result availability as None, Partial, or All. Experiment
+updates are timestamped progress records. Experiment results contain structured summaries,
+metadata, and optional downloadable data packages.
+
+Draft and in-review experiments may be edited. Draft experiments may be submitted for review and
+quote preparation. A QuoteSent experiment has associated pricing and expiry information. Accepting
+a quote creates an invoice and is a consequential operation requiring operator approval.

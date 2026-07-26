@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, create_model
 from eventpilot.core.monitoring import (
     SelectObjective,
     available_source_tools,
+    required_source_actions,
     validate_finish,
     validate_wait,
 )
@@ -172,12 +173,16 @@ def available_tool_types(
         for tool_type in source.tool_types
         if tool_type.model_fields["tool"].default in source_names
     )
-    core: tuple[type[SourceToolCall], ...] = (SendAlert,)
-    if source_state.get("phase") == "objective":
+    pending_alert = source_state.get("pending_alert_resource_id")
+    required_actions = required_source_actions(source_state)
+    core: tuple[type[SourceToolCall], ...] = (SendAlert,) if pending_alert else ()
+    if not pending_alert and not required_actions:
+        core = (SendAlert,)
+    if not pending_alert and not required_actions and source_state.get("phase") == "objective":
         core += (SelectObjective,)
-    if validate_wait(source_state) is None:
+    if not pending_alert and not required_actions and validate_wait(source_state) is None:
         core += (Wait,)
-    if validate_finish(source_state) is None:
+    if not pending_alert and not required_actions and validate_finish(source_state) is None:
         core += (FinishCycle,)
     return (*tools, *core)
 

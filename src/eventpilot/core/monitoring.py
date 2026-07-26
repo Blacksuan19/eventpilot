@@ -14,10 +14,19 @@ class SelectObjective(SourceToolCall):
     """Commit a cycle to a validated portfolio and objective type."""
 
     tool: Literal["select_objective"] = "select_objective"
-    kind: ObjectiveKind = Field(description="Monitoring objective enforced for this cycle.")
+    kind: ObjectiveKind = Field(
+        description=(
+            "Cycle intent: monitor follows all active discovered resources; report_results "
+            "delivers available results; status_digest summarizes multiple resources; "
+            "investigate_incident examines related abnormal resources."
+        )
+    )
     resource_ids: list[str] = Field(
         min_length=1,
-        description="Discovered platform resource identifiers available for interleaved work.",
+        description=(
+            "Discovered platform resource identifiers in scope. A monitor objective must include "
+            "every active discovered resource."
+        ),
     )
     summary: str = Field(min_length=1, description="Purpose and scope of this objective.")
 
@@ -49,11 +58,26 @@ def available_source_tools(source: DataSource, state: dict[str, Any]) -> set[str
         return set()
     evidence = state.get("evidence", {})
     scoped_ids = (state.get("objective") or {}).get("resource_ids", [])
+    required = set(required_source_actions(state).values())
     return {
         str(tool_type.model_fields["tool"].default)
         for tool_type in source.tool_types
         if tool_type.model_fields["tool"].default != source.discovery_tool
+        and (not required or str(tool_type.model_fields["tool"].default) in required)
         and _tool_is_available(tool_type, scoped_ids, evidence)
+    }
+
+
+def required_source_actions(state: dict[str, Any]) -> dict[str, str]:
+    """Return unresolved source operations keyed by objective resource identifier."""
+    objective = state.get("objective") or {}
+    completed = set(state.get("completed_resource_ids", []))
+    evidence = state.get("evidence", {})
+    return {
+        resource_id: str(required_action)
+        for resource_id in objective.get("resource_ids", [])
+        if resource_id not in completed
+        if (required_action := evidence.get(resource_id, {}).get("required_action"))
     }
 
 
@@ -122,6 +146,21 @@ def validate_source_action(action: SourceToolCall, state: dict[str, Any]) -> str
     outside = [resource_id for resource_id in resource_ids if resource_id not in scoped_ids]
     if outside:
         return "Resource is outside objective scope."
+    evidence = state.get("evidence", {})
+    required_actions = required_source_actions(state)
+    mismatched = [
+        resource_id
+        for resource_id in resource_ids
+        if (required := required_actions.get(resource_id)) and action.tool_name != required
+    ]
+    if mismatched:
+        resource_id = mismatched[0]
+        return f"Resource {resource_id} currently requires {required_actions[resource_id]}."
+    if resource_ids and not all(
+        _tool_requirements_are_met(type(action), evidence.get(resource_id, {}))
+        for resource_id in resource_ids
+    ):
+        return "Resource does not satisfy the selected tool's current requirements."
     candidates = state.get("next_resource_candidates", [])
     if candidates and resource_ids[0] == state.get("last_inspected_resource_id"):
         return (
@@ -135,6 +174,19 @@ def action_resource_ids(action: SourceToolCall) -> list[str]:
     """Extract conventional singular resource identifiers from a source action."""
     payload = action.model_dump(mode="json")
     return [str(value) for key, value in payload.items() if key.endswith("_id") and value]
+
+
+def record_rejected_action(action: SourceToolCall, state: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a required operation after an operator explicitly rejects it."""
+    updated = deepcopy(state)
+    evidence = updated.get("evidence", {})
+    for resource_id in action_resource_ids(action):
+        resource_evidence = evidence.get(resource_id, {})
+        if resource_evidence.get("required_action") == action.tool_name:
+            resource_evidence.pop("required_action", None)
+            resource_evidence.pop("wait_blocker", None)
+            resource_evidence["last_rejected_action"] = action.tool_name
+    return updated
 
 
 def validate_wait(state: dict[str, Any]) -> str | None:
@@ -252,6 +304,10 @@ def validate_finish(state: dict[str, Any]) -> str | None:
     pending = state.get("pending_alert_resource_id")
     if pending:
         return f"Result evidence for {pending} must be reported before finishing the cycle."
+    required = required_source_actions(state)
+    if required:
+        resource_id, action = next(iter(required.items()))
+        return f"Resource {resource_id} requires {action} before finishing the cycle."
     if state.get("phase") == "idle":
         return "An idle source must wait before starting another discovery cycle."
     return None
@@ -317,6 +373,10 @@ def _apply_observation(effect: SourceEffect, state: dict[str, Any], observed_at:
         evidence["wait_blocker"] = effect.wait_blocker
     if effect.clear_wait_blocker:
         evidence.pop("wait_blocker", None)
+    if effect.required_action is not None:
+        evidence["required_action"] = effect.required_action
+    if effect.clear_required_action:
+        evidence.pop("required_action", None)
     if effect.result_ready:
         evidence["result_ready"] = True
         state["pending_alert_resource_id"] = effect.resource_id
@@ -334,12 +394,25 @@ def _tool_is_available(
     evidence: dict[str, dict[str, Any]],
 ) -> bool:
     """Evaluate a tool's declarative prerequisites against scoped evidence."""
+    return any(
+        _tool_requirements_are_met(tool_type, item)
+        for resource_id in scoped_ids
+        if (item := evidence.get(resource_id, {}))
+    )
+
+
+def _tool_requirements_are_met(tool_type: type[SourceToolCall], evidence: dict[str, Any]) -> bool:
+    """Evaluate one tool's declarative requirements for one concrete resource."""
     requirement = tool_type.availability
     if requirement is None:
         return True
-    return any(
-        (not requirement.statuses or item.get("status") in requirement.statuses)
-        and all(item.get(key) for key in requirement.evidence_keys)
-        for resource_id in scoped_ids
-        if (item := evidence.get(resource_id, {}))
+    structured_requirement = (
+        evidence.get("requirements", {}).get(requirement.requirement_key, {})
+        if requirement.requirement_key
+        else {}
+    )
+    return (
+        (not requirement.statuses or evidence.get("status") in requirement.statuses)
+        and all(evidence.get(key) for key in requirement.evidence_keys)
+        and (requirement.requirement_key is None or structured_requirement.get("satisfied") is True)
     )

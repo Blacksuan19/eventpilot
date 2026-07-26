@@ -1,5 +1,6 @@
 """Expose the Adaptyv Foundry API as a pluggable agent data source."""
 
+from dataclasses import dataclass
 from importlib.resources import files
 from typing import Any
 
@@ -24,6 +25,18 @@ from eventpilot.sources.base import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class AdaptyvSourcePolicy:
+    """Configure source-owned constraints that are not part of the Foundry API."""
+
+    minimum_replicates: int = 2
+
+    def __post_init__(self) -> None:
+        """Reject an invalid replicate floor at source construction time."""
+        if self.minimum_replicates < 0:
+            raise ValueError("minimum_replicates must be non-negative")
+
+
 class AdaptyvDataSource:
     """Expose Foundry API operations and normalize their effects for the agent."""
 
@@ -40,9 +53,15 @@ class AdaptyvDataSource:
         GetExperimentQuote,
     )
 
-    def __init__(self, client: FoundryClient) -> None:
+    def __init__(
+        self,
+        client: FoundryClient,
+        *,
+        policy: AdaptyvSourcePolicy | None = None,
+    ) -> None:
         """Bind the agent data source to a real or fixture-backed Foundry API client."""
         self._client = client
+        self._policy = policy or AdaptyvSourcePolicy()
         self.instructions = (
             files("eventpilot.adapters.adaptyv")
             .joinpath("instructions.txt")
@@ -130,22 +149,37 @@ class AdaptyvDataSource:
             blocker = f"Draft {action.experiment_id} must be prepared and submitted before waiting."
         elif result["status"] == ExperimentStatus.QUOTE_SENT:
             blocker = f"Quote {action.experiment_id} must be reviewed for approval before waiting."
+        evidence = {
+            "status": result["status"],
+            "results_status": result["results_status"],
+            "result_ready": (
+                result["status"] == ExperimentStatus.DONE
+                and result["results_status"] in {"Partial", "All"}
+            ),
+            "experiment_spec": result.get("experiment_spec", {}),
+            "detail_observed": True,
+        }
+        if result["status"] == ExperimentStatus.DRAFT:
+            requirements = self._draft_requirements(result.get("experiment_spec", {}))
+            evidence["requirements"] = requirements
+            required_action = (
+                "submit_experiment"
+                if requirements["submit_experiment"]["satisfied"]
+                else "update_experiment"
+            )
+        elif result["status"] == ExperimentStatus.QUOTE_SENT:
+            required_action = "get_experiment_quote"
+        else:
+            required_action = None
         effect = SourceEffect(
             "observation",
             resource_id=action.experiment_id,
-            evidence={
-                "status": result["status"],
-                "results_status": result["results_status"],
-                "result_ready": (
-                    result["status"] == ExperimentStatus.DONE
-                    and result["results_status"] in {"Partial", "All"}
-                ),
-                "experiment_spec": result.get("experiment_spec", {}),
-                "detail_observed": True,
-            },
+            evidence=evidence,
             inspected=True,
             wait_blocker=blocker,
             clear_wait_blocker=blocker is None,
+            required_action=required_action,
+            clear_required_action=required_action is None,
         )
         return SourceExecution(result=result, effects=(effect,))
 
@@ -158,12 +192,18 @@ class AdaptyvDataSource:
             return self._rejected("Experiment is not editable.")
         experiment = await self._client.update_experiment(action.experiment_id, action.changes)
         result = experiment.model_dump(mode="json")
+        requirements = (
+            self._draft_requirements(result.get("experiment_spec", {}))
+            if result["status"] == ExperimentStatus.DRAFT
+            else {}
+        )
         effect = SourceEffect(
             "observation",
             resource_id=action.experiment_id,
             evidence={
                 "status": result["status"],
                 "experiment_spec": result.get("experiment_spec", {}),
+                "requirements": requirements,
                 "last_action": action.tool_name,
             },
             inspected=True,
@@ -171,6 +211,9 @@ class AdaptyvDataSource:
                 f"Draft {action.experiment_id} must be submitted before waiting."
                 if result["status"] == ExperimentStatus.DRAFT
                 else None
+            ),
+            required_action=(
+                "submit_experiment" if result["status"] == ExperimentStatus.DRAFT else None
             ),
         )
         return SourceExecution(result=result, effects=(effect,))
@@ -182,9 +225,13 @@ class AdaptyvDataSource:
         evidence = self._evidence(context, action.experiment_id)
         if evidence.get("status") != ExperimentStatus.DRAFT:
             return self._rejected("Experiment is not a draft.")
-        if evidence.get("experiment_spec", {}).get("n_replicates", 0) < 2:
+        requirement = self._draft_requirements(evidence.get("experiment_spec", {}))[
+            "submit_experiment"
+        ]
+        if not requirement["satisfied"]:
             return self._rejected(
-                "Draft policy requires at least two replicates before submission."
+                "Draft policy requires at least "
+                f"{requirement['minimum_replicates']} replicates before submission."
             )
         confirmation = await self._client.submit_experiment(action.experiment_id)
         result = confirmation.model_dump(mode="json")
@@ -194,6 +241,7 @@ class AdaptyvDataSource:
             evidence={"status": result["status"], "last_action": action.tool_name},
             inspected=True,
             clear_wait_blocker=True,
+            clear_required_action=True,
         )
         return SourceExecution(result=result, effects=(effect,))
 
@@ -214,6 +262,7 @@ class AdaptyvDataSource:
             wait_blocker=(
                 f"Quote {action.experiment_id} requires an operator decision before waiting."
             ),
+            required_action="accept_experiment_quote",
         )
         return SourceExecution(result=result, effects=(effect,))
 
@@ -236,6 +285,7 @@ class AdaptyvDataSource:
             },
             inspected=True,
             clear_wait_blocker=True,
+            clear_required_action=True,
         )
         return SourceExecution(result=result, effects=(effect,))
 
@@ -268,6 +318,18 @@ class AdaptyvDataSource:
     def _evidence(context: SourceContext, resource_id: str) -> dict[str, Any]:
         """Return the graph's latest normalized evidence for one experiment."""
         return context.state.get("evidence", {}).get(resource_id, {})
+
+    def _draft_requirements(self, experiment_spec: dict[str, Any]) -> dict[str, Any]:
+        """Describe configured submission constraints as agent-visible evidence."""
+        minimum = self._policy.minimum_replicates
+        actual = int(experiment_spec.get("n_replicates", 0))
+        return {
+            "submit_experiment": {
+                "minimum_replicates": minimum,
+                "actual_replicates": actual,
+                "satisfied": actual >= minimum,
+            }
+        }
 
     @staticmethod
     def _rejected(reason: str) -> SourceExecution:

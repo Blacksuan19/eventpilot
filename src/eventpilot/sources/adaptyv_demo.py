@@ -83,12 +83,19 @@ class DemoAdaptyvReasoningEngine:
             experiment_id = experiment["id"]
             if experiment["status"] == ExperimentStatus.DRAFT:
                 replicates = experiment.get("experiment_spec", {}).get("n_replicates", 0)
-                if replicates < 2:
+                requirement = (
+                    source_state.get("evidence", {})
+                    .get(experiment_id, {})
+                    .get("requirements", {})
+                    .get("submit_experiment", {})
+                )
+                minimum_replicates = int(requirement.get("minimum_replicates", 0))
+                if not requirement.get("satisfied", replicates >= minimum_replicates):
                     return AgentTurn(
-                        rationale="The draft needs at least two replicates before submission.",
+                        rationale="The draft does not satisfy its submission requirements.",
                         action=UpdateExperiment(
                             experiment_id=experiment_id,
-                            changes=ModifyExperimentRequest(n_replicates=3),
+                            changes=ModifyExperimentRequest(n_replicates=minimum_replicates),
                         ),
                     )
                 return AgentTurn(

@@ -52,7 +52,11 @@ class SubmitExperiment(SourceToolCall):
     """Submit a draft Foundry experiment for review and quote preparation."""
 
     tool: Literal["submit_experiment"] = "submit_experiment"
-    availability = ToolAvailability(statuses=("Draft",), evidence_keys=("detail_observed",))
+    availability = ToolAvailability(
+        statuses=("Draft",),
+        evidence_keys=("detail_observed",),
+        requirement_key="submit_experiment",
+    )
     experiment_id: str = Field(min_length=1, description="Draft experiment identifier.")
 
 

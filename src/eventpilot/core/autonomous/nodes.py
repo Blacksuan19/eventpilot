@@ -25,6 +25,7 @@ from eventpilot.core.monitoring import (
     initial_state,
     record_alert,
     record_finish,
+    record_rejected_action,
     select_objective,
     should_continue_after_alert,
     validate_alert,
@@ -242,6 +243,7 @@ class AutonomousGraphNodes:
         """Record an operator rejection without executing the suspended source tool."""
         action = _turn(state, self.source).action
         update = _rejected_tool_result(state, action, "The operator rejected this action.")
+        update["source_state"] = record_rejected_action(action, self.source_state(state))
         update["pending_approval"] = None
         update["approval_decision"] = ApprovalDecision.REJECTED.value
         self.report_tool_result(state, action, update.get("transcript", [])[-1]["result"], update)

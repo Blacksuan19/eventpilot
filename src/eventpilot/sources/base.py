@@ -15,6 +15,7 @@ class ToolAvailability:
 
     statuses: tuple[str, ...] = ()
     evidence_keys: tuple[str, ...] = ()
+    requirement_key: str | None = None
 
 
 class SourceToolCall(BaseModel):
@@ -52,6 +53,8 @@ class SourceEffect:
     result_ready: bool = False
     wait_blocker: str | None = None
     clear_wait_blocker: bool = False
+    required_action: str | None = None
+    clear_required_action: bool = False
 
 
 @dataclass(frozen=True, slots=True)

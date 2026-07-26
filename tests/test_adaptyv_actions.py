@@ -15,14 +15,22 @@ from eventpilot.adapters.adaptyv.tools import (
     GetExperiment,
     GetExperimentQuote,
     ListExperiments,
+    UpdateExperiment,
 )
 from eventpilot.core.agent_reasoning import AgentTurn, FinishCycle
 from eventpilot.core.approvals import ApprovalDecision
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
-from eventpilot.core.monitoring import SelectObjective
+from eventpilot.core.monitoring import (
+    SelectObjective,
+    apply_execution,
+    available_source_tools,
+    initial_state,
+    select_objective,
+)
 from eventpilot.core.notifications import DeliveryResult, Notification
 from eventpilot.core.reporting import AgentEvent, ApprovalRequestedEvent
-from eventpilot.sources.adaptyv import AdaptyvDataSource
+from eventpilot.sources.adaptyv import AdaptyvDataSource, AdaptyvSourcePolicy
+from eventpilot.sources.base import SourceContext
 
 
 class StaticClock:
@@ -142,6 +150,56 @@ async def test_mock_mutations_gate_draft_and_quote_lifecycles() -> None:
     assert quote.amount_total == 125_000
     assert accepted.status == "accepted"
     assert (await client.get_experiment("experiment-il6")).status == "WaitingForMaterials"
+
+
+async def test_submission_policy_is_structured_and_controls_tool_availability() -> None:
+    """Expose source policy as evidence and enforce it through generic graph tooling."""
+    clock = StaticClock()
+    clock.now = 1_000_000
+    source = AdaptyvDataSource(
+        MockFoundryClient.from_fixture(clock=clock),
+        policy=AdaptyvSourcePolicy(minimum_replicates=4),
+    )
+    state = initial_state()
+    context = SourceContext(state=state, transcript=[], clock=clock)
+
+    discovery = await source.execute(ListExperiments(), context)
+    result, state = apply_execution(discovery, state, observed_at=clock())
+    _, state = select_objective(
+        SelectObjective(
+            kind="monitor",
+            resource_ids=[item["id"] for item in result["items"]],
+            summary="Monitor the Foundry portfolio.",
+        ),
+        state,
+    )
+    detail = await source.execute(
+        GetExperiment(experiment_id="experiment-tp53"),
+        SourceContext(state=state, transcript=[], clock=clock),
+    )
+    _, state = apply_execution(detail, state, observed_at=clock())
+
+    requirement = state["evidence"]["experiment-tp53"]["requirements"]["submit_experiment"]
+    assert requirement == {
+        "minimum_replicates": 4,
+        "actual_replicates": 1,
+        "satisfied": False,
+    }
+    assert "update_experiment" in available_source_tools(source, state)
+    assert "submit_experiment" not in available_source_tools(source, state)
+
+    update = await source.execute(
+        UpdateExperiment(
+            experiment_id="experiment-tp53",
+            changes=ModifyExperimentRequest(n_replicates=4),
+        ),
+        SourceContext(state=state, transcript=[], clock=clock),
+    )
+    _, state = apply_execution(update, state, observed_at=clock())
+
+    requirement = state["evidence"]["experiment-tp53"]["requirements"]["submit_experiment"]
+    assert requirement["satisfied"] is True
+    assert "submit_experiment" in available_source_tools(source, state)
 
 
 @pytest.mark.parametrize(
