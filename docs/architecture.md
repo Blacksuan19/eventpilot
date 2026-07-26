@@ -9,13 +9,12 @@ observations; the LLM decides when and how to use them within graph-enforced mon
 ```text
 Docker container
 └── AgentRuntime (`while True`)
-    └── finite LangGraph cycle (stable SQLite supervisor thread)
+    └── finite LangGraph invocation (stable SQLite supervisor thread)
         └── LLM agent ◄──► generic tool router
             ├── parallel-safe source reads ──► Send fan-out ──► DataSource ──► reducer
             ├── state-changing source tool ──► configured DataSource
             ├── send_alert(...) ──► configured NotificationSink ──► END
-            ├── wait(seconds, reason) ──► LLM agent
-            └── finish_cycle(summary) ──► END
+            └── wait(seconds, reason) ──► checkpoint deadline ──► sleep ──► END
 ```
 
 The core graph knows nothing about experiments, workflow runs, or platform APIs. It owns a generic
@@ -45,10 +44,10 @@ through its client transport. The data source provides:
 - Normalized discovery and observation effects returned by tool execution.
 - Approval metadata for consequential operations.
 
-Tool handlers receive a `SourceContext` containing graph-owned monitoring state, the current-cycle
+Tool handlers receive a `SourceContext` containing graph-owned monitoring state, the current-invocation
 transcript, and the clock. They return the platform JSON result plus immutable `SourceEffect`
 records. The graph reducer owns scope, portfolio rotation, evidence persistence, deduplication,
-polling, alert readiness, and cycle transitions.
+polling, alert readiness, and invocation transitions.
 
 A GitHub Actions plugin, for example, could register `list_workflow_runs`, `get_workflow_run`,
 `list_run_jobs`, and `rerun_workflow` models. Its handlers could call `gh` through an injected CLI
@@ -61,17 +60,15 @@ would emit observations. The graph and notification provider would remain unchan
 against current scope and normalized evidence before the configured `NotificationSink` receives the
 message. After confirmed delivery, the graph records deduplication and monitoring state.
 
-`wait` pauses inside the process for the LLM-selected interval. Afterward, the graph records the
-requested duration and wake timestamp in its polling state. An operating-system
-sleep cannot survive container termination; after Docker restarts the process, the supervisor
-observes current platform state again.
-
-`finish_cycle` records a summary and routes to `END` after graph policy approves it. The runtime
-immediately starts a fresh finite invocation on the same SQLite thread. It is not a shutdown tool.
+`wait` checkpoints the selected interval and absolute wake deadline before pausing inside the
+process. A normal wake records the polling state and reaches the explicit end-invocation node. If
+the process exits during the sleep, the runtime resumes LangGraph's unfinished checkpoint with
+`None` input and sleeps only for the remaining interval. Once the invocation reaches `END`, the
+runtime starts a fresh finite invocation on the same SQLite thread.
 
 ## Runtime reporting
 
-The graph emits typed `AgentDecisionEvent`, `ToolResultEvent`, and `CycleFinishedEvent` records
+The graph emits typed `AgentDecisionEvent`, `ToolResultEvent`, and `InvocationFinishedEvent` records
 through an `AgentReporter` protocol. Decision events include every concrete Pydantic action model,
 validated arguments, whether the turn is parallel, rationale, currently available tools, counters,
 and the source-state snapshot.
@@ -105,7 +102,7 @@ and accelerated tests without exposing timing metadata to the LLM.
 ## Responsibility split
 
 - The LLM chooses source tools, alerts, and polling cadence.
-- LangGraph owns generic routing, objectives, resource state, polling, delivery policy, cycle state,
+- LangGraph owns generic routing, objectives, resource state, polling, delivery policy, invocation state,
   and checkpoints.
 - Instructor validates choices against the dynamically composed tool schema.
 - A data source owns platform tools, API translation, and platform-specific preconditions.

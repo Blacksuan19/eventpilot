@@ -17,6 +17,7 @@ class AutonomousAgentState(TypedDict, total=False):
     tool_count: int
     pending_approval: dict[str, Any] | None
     approval_decision: str | None
+    pending_wait: dict[str, Any] | None
     parallel_action_index: int
     parallel_results: Annotated[list[dict[str, Any]], add]
 

@@ -29,6 +29,8 @@ class AgentRuntime:
         self._resume_queue: asyncio.Queue[tuple[str, Command[Any]]] = asyncio.Queue()
         self._resume_lock = asyncio.Lock()
         self._submitted_approval_ids: set[str] = set()
+        self._approval_ready = asyncio.Event()
+        self._ready_approval_id: str | None = None
 
     async def run(self, *, max_invocations: int | None = None) -> AutonomousAgentState:
         """Run bounded invocations while preserving native LangGraph interrupts."""
@@ -45,6 +47,7 @@ class AgentRuntime:
                 approval_id = str(pending["id"]) if isinstance(pending, dict) else None
                 if approval_id is None:
                     raise RuntimeError("Approval interrupt is missing its pending identifier")
+                self._signal_approval_ready(approval_id)
                 graph_input, resuming_approval_id = await self._resume_input(approval_id)
                 continue
             completed += 1
@@ -56,13 +59,11 @@ class AgentRuntime:
         async with self._resume_lock:
             if approval_id in self._submitted_approval_ids:
                 return False
-            pending = None
-            for _ in range(50):
-                pending = await self._pending_approval(require_interrupt=False)
-                if pending is not None:
-                    break
-                await asyncio.sleep(0.01)
+            pending = await self._pending_approval()
             if pending is None or pending.get("id") != approval_id:
+                return False
+            await self._approval_ready.wait()
+            if self._ready_approval_id != approval_id:
                 return False
             self._submitted_approval_ids.add(approval_id)
             self._resume_queue.put_nowait((approval_id, Command(resume=decision.value)))
@@ -70,13 +71,19 @@ class AgentRuntime:
 
     async def _initial_input(
         self,
-    ) -> tuple[dict[str, Any] | Command[Any], str | None]:
-        """Resume a checkpointed interrupt or start a fresh graph invocation."""
-        pending = await self._pending_approval()
-        if pending is None:
-            return {"transcript": [], "tool_count": 0}, None
-        approval_id = str(pending["id"])
-        return await self._resume_input(approval_id)
+    ) -> tuple[dict[str, Any] | Command[Any] | None, str | None]:
+        """Resume unfinished checkpoint work or start a fresh graph invocation."""
+        snapshot = await self._graph.aget_state(self._config)
+        if any(task.interrupts for task in snapshot.tasks):
+            pending = snapshot.values.get("pending_approval")
+            if not isinstance(pending, dict) or "id" not in pending:
+                raise RuntimeError("Approval interrupt is missing its pending identifier")
+            approval_id = str(pending["id"])
+            self._signal_approval_ready(approval_id)
+            return await self._resume_input(approval_id)
+        if snapshot.next:
+            return None, None
+        return {"transcript": [], "tool_count": 0}, None
 
     async def _resume_input(self, approval_id: str) -> tuple[Command[Any], str]:
         """Claim and return the command for one exact pending approval."""
@@ -85,12 +92,17 @@ class AgentRuntime:
             raise RuntimeError(
                 f"Approval command {submitted_id} cannot resume pending approval {approval_id}"
             )
+        self._approval_ready.clear()
+        self._ready_approval_id = None
         return command, submitted_id
 
-    async def _pending_approval(self, *, require_interrupt: bool = True) -> dict[str, Any] | None:
-        """Read a durable pending approval from the graph's current checkpoint."""
+    async def _pending_approval(self) -> dict[str, Any] | None:
+        """Read a checkpointed pending approval before awaiting interrupt readiness."""
         snapshot = await self._graph.aget_state(self._config)
-        if require_interrupt and not any(task.interrupts for task in snapshot.tasks):
-            return None
         pending = snapshot.values.get("pending_approval")
         return dict(pending) if isinstance(pending, dict) else None
+
+    def _signal_approval_ready(self, approval_id: str) -> None:
+        """Publish the exact interrupt that can accept an operator decision."""
+        self._ready_approval_id = approval_id
+        self._approval_ready.set()

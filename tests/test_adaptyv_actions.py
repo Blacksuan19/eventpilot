@@ -3,10 +3,12 @@
 import asyncio
 from contextlib import suppress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.types import Command
 
 from eventpilot.adapters.adaptyv.mock import MockFoundryClient, load_scenarios
 from eventpilot.adapters.adaptyv.models import ModifyExperimentRequest, QuoteConfirmation
@@ -61,6 +63,37 @@ class BlockingQuoteClient(MockFoundryClient):
         self.accept_started.set()
         await self.release_accept.wait()
         return await super().accept_experiment_quote(experiment_id)
+
+
+class DelayedInterruptGraph:
+    """Expose checkpointed approval state before returning its interrupt result."""
+
+    def __init__(self) -> None:
+        """Create controls around the delayed interrupt return."""
+        self.interrupt_started = asyncio.Event()
+        self.release_interrupt = asyncio.Event()
+        self.pending = {
+            "id": "approval-delayed",
+            "tool": "accept_experiment_quote",
+        }
+
+    async def aget_state(self, config: dict[str, Any]) -> Any:
+        """Return pending state once the simulated graph reaches approval."""
+        if self.interrupt_started.is_set():
+            return SimpleNamespace(
+                values={"pending_approval": self.pending},
+                tasks=(),
+                next=("human_approval",),
+            )
+        return SimpleNamespace(values={}, tasks=(), next=())
+
+    async def ainvoke(self, graph_input: Any, config: dict[str, Any]) -> dict[str, Any]:
+        """Delay interrupt publication, then accept the runtime resume command."""
+        if isinstance(graph_input, Command):
+            return {"pending_approval": None, "outcome": "invocation_finished"}
+        self.interrupt_started.set()
+        await self.release_interrupt.wait()
+        return {"pending_approval": self.pending, "__interrupt__": (self.pending,)}
 
 
 async def immediate_sleep(seconds: float) -> None:
@@ -323,6 +356,31 @@ async def test_approval_remains_claimed_until_resume_invocation_finishes() -> No
     assert client.accept_attempts == 1
 
 
+async def test_approval_waits_for_runtime_interrupt_signal() -> None:
+    """Await interrupt readiness without polling or rejecting an early valid decision."""
+    graph = DelayedInterruptGraph()
+    runtime = AgentRuntime(graph)
+    run = asyncio.create_task(runtime.run(max_invocations=1))
+    await graph.interrupt_started.wait()
+    assert (
+        await asyncio.wait_for(
+            runtime.resolve_approval("approval-unknown", ApprovalDecision.APPROVED),
+            timeout=0.1,
+        )
+        is False
+    )
+
+    decision = asyncio.create_task(
+        runtime.resolve_approval("approval-delayed", ApprovalDecision.APPROVED)
+    )
+    await asyncio.sleep(0)
+    assert not decision.done()
+
+    graph.release_interrupt.set()
+    assert await asyncio.wait_for(decision, timeout=1) is True
+    await asyncio.wait_for(run, timeout=1)
+
+
 async def test_quote_interrupt_resumes_after_runtime_restart(tmp_path: Path) -> None:
     """Persist a pending approval and resume it through a newly compiled graph."""
     database = tmp_path / "checkpoints.sqlite"
@@ -363,11 +421,11 @@ async def test_quote_interrupt_resumes_after_runtime_restart(tmp_path: Path) -> 
             checkpointer=checkpointer,
         )
         restored_runtime = AgentRuntime(restored_graph)
+        restored_run = asyncio.create_task(restored_runtime.run(max_invocations=1))
         assert await restored_runtime.resolve_approval(
             str(pending["id"]), ApprovalDecision.APPROVED
         )
-
-        result = await restored_runtime.run(max_invocations=1)
+        result = await restored_run
 
     acceptance = next(
         entry

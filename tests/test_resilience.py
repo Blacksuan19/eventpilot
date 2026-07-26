@@ -4,6 +4,7 @@ import asyncio
 from typing import Any, Literal
 
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.errors import GraphRecursionError, NodeTimeoutError
 
 from eventpilot.adapters.adaptyv.mock import MockFoundryClient
@@ -156,6 +157,50 @@ class RepeatingDiscoveryAgent:
         return AgentTurn(rationale="Repeat discovery indefinitely.", action=ListExperiments())
 
 
+class SingleWaitAgent:
+    """Select one wait and fail if crash recovery asks for a new decision."""
+
+    def __init__(self) -> None:
+        """Start before the sole expected reasoning call."""
+        self.calls = 0
+
+    async def decide(
+        self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
+    ) -> AgentTurn:
+        """Return one wait while rejecting an accidental fresh invocation."""
+        self.calls += 1
+        if self.calls > 1:
+            raise AssertionError("Recovery must resume the checkpointed wait")
+        return AgentTurn(
+            rationale="Wait before polling again.",
+            action=Wait(seconds=10, reason="Poll after the interval."),
+        )
+
+
+class RestartableWaitClock:
+    """Pause the first sleep and record the remaining sleep after restart."""
+
+    def __init__(self) -> None:
+        """Initialize a deterministic timestamp and sleep controls."""
+        self.now = 100.0
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        """Return the current deterministic timestamp."""
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        """Block the first sleep and complete subsequent remaining intervals."""
+        self.sleeps.append(seconds)
+        if len(self.sleeps) == 1:
+            self.started.set()
+            await self.release.wait()
+            return
+        self.now += seconds
+
+
 async def test_reasoning_node_recovers_from_transient_failure() -> None:
     """Retry a transient model connection failure through LangGraph policy."""
     agent = FlakyWaitAgent()
@@ -225,6 +270,49 @@ async def test_non_repeatable_source_action_is_not_retried() -> None:
         await AgentRuntime(graph).run(max_invocations=1)
 
     assert source.attempts == 1
+
+
+async def test_runtime_restart_resumes_only_the_remaining_wait() -> None:
+    """Resume an unfinished wait checkpoint without restarting its full interval."""
+    checkpointer = InMemorySaver()
+    agent = SingleWaitAgent()
+    clock = RestartableWaitClock()
+    source = AdaptyvDataSource(MockFoundryClient.from_fixture())
+    first_graph = build_autonomous_graph(
+        agent,
+        source,
+        NoopSink(),
+        checkpointer=checkpointer,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    first_run = asyncio.create_task(AgentRuntime(first_graph).run(max_invocations=1))
+    await asyncio.wait_for(clock.started.wait(), timeout=1)
+
+    first_run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_run
+    snapshot = await first_graph.aget_state(
+        {"configurable": {"thread_id": AgentRuntime.thread_id}}
+    )
+    assert snapshot.next == ("wait",)
+    assert snapshot.values["pending_wait"]["wake_at"] == 110
+
+    clock.now = 104
+    restarted_graph = build_autonomous_graph(
+        agent,
+        source,
+        NoopSink(),
+        checkpointer=checkpointer,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    result = await AgentRuntime(restarted_graph).run(max_invocations=1)
+
+    assert agent.calls == 1
+    assert clock.sleeps == [10, 6]
+    assert result.get("pending_wait") is None
+    assert result.get("invocation_summary") == "Waited 10 seconds before the next invocation."
 
 
 async def test_langgraph_recursion_limit_stops_an_unbounded_agent_loop() -> None:

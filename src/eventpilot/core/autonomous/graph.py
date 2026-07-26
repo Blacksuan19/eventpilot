@@ -82,6 +82,7 @@ def build_autonomous_graph(
         nodes.request_approval,
         timeout=external_call_timeout_seconds,
     )
+    builder.add_node("publish_approval", nodes.publish_approval)
     builder.add_node("human_approval", nodes.human_approval)
     builder.add_node("reject_approval", nodes.reject_approval)
     builder.add_node(
@@ -89,6 +90,7 @@ def build_autonomous_graph(
         nodes.send_alert,
         timeout=external_call_timeout_seconds,
     )
+    builder.add_node("prepare_wait", nodes.prepare_wait)
     builder.add_node("wait", nodes.wait)
     builder.add_node("end_invocation", nodes.end_invocation)
     builder.add_node("reject_action", nodes.reject_action)
@@ -103,17 +105,23 @@ def build_autonomous_graph(
             "select_objective": "select_objective",
             "request_approval": "request_approval",
             "send_alert": "send_alert",
-            "wait": "wait",
+            "wait": "prepare_wait",
             "reject_action": "reject_action",
         },
     )
-    builder.add_edge("request_approval", "human_approval")
+    builder.add_edge("request_approval", "publish_approval")
+    builder.add_edge("publish_approval", "human_approval")
     builder.add_edge("source_tool", "agent")
     builder.add_edge("retryable_source_tool", "agent")
     builder.add_edge("parallel_source_tool", "reduce_parallel_source_tools")
     builder.add_edge("reduce_parallel_source_tools", "agent")
     builder.add_edge("select_objective", "agent")
     builder.add_edge("reject_approval", "agent")
+    builder.add_conditional_edges(
+        "prepare_wait",
+        nodes.route_prepared_wait,
+        {"wait": "wait", "agent": "agent"},
+    )
     builder.add_conditional_edges(
         "wait",
         nodes.route_invocation_end,

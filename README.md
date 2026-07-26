@@ -118,8 +118,10 @@ flowchart TB
 
 Every completed tool path updates checkpointed state. Independent source reads run as LangGraph
 `Send` branches and join in selection order. Approval-sensitive tools suspend at `interrupt()` and
-resume from the same checkpoint with `Command`. Successful waits and completed objectives reach
-`END`. The runtime then invokes the graph again with the same thread identifier.
+resume from the same checkpoint with `Command`. A wait checkpoints its deadline before sleeping.
+After a process restart, the runtime resumes that unfinished superstep and sleeps only until the
+remaining deadline. Successful waits and completed objectives reach `END`. The runtime then invokes
+the graph again with the same thread identifier.
 
 ## Notification sinks
 

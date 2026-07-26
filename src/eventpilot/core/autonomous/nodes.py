@@ -300,22 +300,32 @@ class AutonomousGraphNodes:
             "arguments": arguments,
             "delivery": receipt.model_dump(mode="json"),
         }
+        return {"pending_approval": pending, "approval_decision": None}
+
+    def publish_approval(self, state: AutonomousAgentState) -> AutonomousAgentState:
+        """Expose an approval only after its pending action has been checkpointed."""
+        pending = state.get("pending_approval")
+        if not isinstance(pending, dict):
+            raise ValueError("Approval publication requires a pending action")
+        delivery = pending.get("delivery")
+        if not isinstance(delivery, dict):
+            raise ValueError("Approval publication requires a delivery receipt")
         self.reporter.emit(
             ApprovalRequestedEvent(
                 data_source=self.source.name,
                 invocation_count=state.get("invocation_count", 0),
                 tool_count=state.get("tool_count", 0),
-                approval_id=approval_id,
-                title=requirement.title,
-                body=requirement.body,
-                resource_ids=list(requirement.resource_ids),
-                tool=action.tool_name,
-                action_model=type(action).__name__,
-                arguments=arguments,
-                delivery=receipt.model_dump(mode="json"),
+                approval_id=str(pending["id"]),
+                title=str(pending["title"]),
+                body=str(pending["body"]),
+                resource_ids=[str(item) for item in pending["resource_ids"]],
+                tool=str(pending["tool"]),
+                action_model=str(pending["action_model"]),
+                arguments=dict(pending["arguments"]),
+                delivery=delivery,
             )
         )
-        return {"pending_approval": pending, "approval_decision": None}
+        return {}
 
     def human_approval(
         self, state: AutonomousAgentState
@@ -384,8 +394,8 @@ class AutonomousGraphNodes:
         self.report_tool_result(state, action, result, update)
         return update
 
-    async def wait(self, state: AutonomousAgentState) -> AutonomousAgentState:
-        """Pause for the model-selected interval and advance graph scheduling state."""
+    def prepare_wait(self, state: AutonomousAgentState) -> AutonomousAgentState:
+        """Validate a wait and checkpoint its deadline before the process sleeps."""
         action = _expect_action(state, self.source, Wait)
         source_state = self.source_state(state)
         rejection = validate_wait(source_state)
@@ -396,23 +406,49 @@ class AutonomousGraphNodes:
             )
             return update
         elapsed_seconds = min(action.seconds, self.max_wait_seconds or action.seconds)
-        wake_at = self.clock() + elapsed_seconds
+        return {
+            "pending_wait": {
+                "requested_seconds": action.seconds,
+                "elapsed_seconds": elapsed_seconds,
+                "reason": action.reason,
+                "wake_at": self.clock() + elapsed_seconds,
+            }
+        }
+
+    @staticmethod
+    def route_prepared_wait(state: AutonomousAgentState) -> Literal["wait", "agent"]:
+        """Continue valid waits and return rejected waits to the agent."""
+        return "wait" if state.get("pending_wait") else "agent"
+
+    async def wait(self, state: AutonomousAgentState) -> AutonomousAgentState:
+        """Sleep until the checkpointed deadline and advance scheduling state."""
+        action = _expect_action(state, self.source, Wait)
+        source_state = self.source_state(state)
+        pending = state.get("pending_wait")
+        if not isinstance(pending, dict):
+            raise ValueError("Wait execution requires a checkpointed deadline")
+        requested_seconds = int(pending["requested_seconds"])
+        elapsed_seconds = float(pending["elapsed_seconds"])
+        wake_at = float(pending["wake_at"])
+        remaining_seconds = max(0.0, wake_at - self.clock())
         sleep = (
             self.idle_sleep
             if source_state.get("phase") == "idle" and self.idle_sleep
             else self.sleep
         )
-        await sleep(elapsed_seconds)
+        if remaining_seconds:
+            await sleep(remaining_seconds)
         result = {
             "status": "completed",
-            "requested_seconds": action.seconds,
+            "requested_seconds": requested_seconds,
             "elapsed_seconds": elapsed_seconds,
-            "reason": action.reason,
+            "reason": str(pending["reason"]),
         }
         update = _tool_result(state, action, result)
         update["source_state"] = after_wait(
-            source_state, requested_seconds=action.seconds, wake_at=wake_at
+            source_state, requested_seconds=requested_seconds, wake_at=wake_at
         )
+        update["pending_wait"] = None
         unit = "second" if elapsed_seconds == 1 else "seconds"
         summary = f"Waited {elapsed_seconds:g} {unit} before the next invocation."
         update.update(
@@ -424,7 +460,7 @@ class AutonomousGraphNodes:
             action,
             result,
             update,
-            requested_wait_seconds=action.seconds,
+            requested_wait_seconds=requested_seconds,
             elapsed_wait_seconds=elapsed_seconds,
         )
         return update
