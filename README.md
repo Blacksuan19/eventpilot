@@ -12,9 +12,12 @@ can inspect or change it. They might read a result, restart a failed workflow, c
 follow-up work, or update an incident.
 
 This repository demonstrates that architecture against
-[Adaptyv Foundry](https://foundry.adaptyvbio.com/). Foundry access is mocked. Its adapter models the
-operations and response shapes described by Adaptyv's published API, while fixture timing and
-lifecycle data stay hidden behind the adapter.
+[Adaptyv Foundry](https://foundry.adaptyvbio.com/). Foundry access is mocked. The integration models
+the operations and response shapes described by Adaptyv's published API. `AdaptyvDataSource`
+exposes those operations to the agent and calls a fixture-backed `FoundryClient`, which keeps demo
+timing and lifecycle data outside the agent.
+
+![EventPilot dashboard showing autonomous monitoring, delivered updates, and an idle wait](output/playwright/eventpilot-dashboard.png)
 
 ## What it does
 
@@ -25,6 +28,53 @@ lifecycle data stay hidden behind the adapter.
 - Suspends approval-sensitive tools for an operator decision before resuming the same graph thread.
 - Delivers updates through a replaceable notification sink and records successful delivery.
 - Persists observations, polling state, approvals, and deduplication data in SQLite checkpoints.
+
+## Run the dashboard
+
+The dashboard starts with the autonomous supervisor and provides the operator controls needed for
+approval requests. Docker users need Docker Engine with the Compose plugin. Running directly with
+uv requires uv itself and Python 3.13 or newer.
+
+Copy the example configuration and add credentials for an Instructor-supported model provider.
+
+```bash
+cp .env.example .env
+```
+
+```dotenv
+LLM_PROVIDER=your-provider
+LLM_MODEL=your-model-id
+LLM_API_KEY=your-api-key
+LLM_API_BASE=
+```
+
+`LLM_API_BASE` is optional and supports providers that expose a compatible custom endpoint.
+
+Start the container.
+
+```bash
+docker compose up --build
+```
+
+Open [http://localhost:8000](http://localhost:8000). The dashboard shows the current decision,
+rationale, typed arguments, experiment states, wait countdowns, delivered messages, pending
+approvals, and the complete tool timeline. Approval controls submit a LangGraph resume command for
+the suspended tool call. Dashboard events and LangGraph checkpoints persist in the Docker volume.
+
+To start the same dashboard directly with uv, run these commands.
+
+```bash
+uv sync
+uv run eventpilot dashboard
+```
+
+Use **Reset demo** in the header to cancel the current run, delete the supervisor thread through the
+LangGraph checkpointer, clear its event history, and start again. The container stays running.
+
+## Architecture
+
+The detailed [architecture document](docs/architecture.md) describes the runtime boundaries and
+ownership split.
 
 Instructor builds the response schema at runtime from the core actions and the data source's
 Pydantic tool models. Each model response is validated against that schema. LangGraph handles
@@ -39,7 +89,7 @@ the next invocation on the same durable thread, retaining source state while cle
 tool transcript. LangGraph's recursion limit remains an emergency guard for a graph that fails to
 reach either stop condition.
 
-## Agent loop
+### Agent loop
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","lineColor":"#64748b","primaryTextColor":"#172033"},"flowchart":{"curve":"linear","nodeSpacing":42,"rankSpacing":52}}}%%
@@ -192,48 +242,6 @@ That gives the agent several kinds of work in the same resource portfolio.
 The quote acceptance is approval-sensitive, so the graph sends an approval request and suspends at
 a LangGraph interrupt. The agent chooses the order of work, polling cadence, source actions, and
 operator updates. Fixture durations remain hidden from the model.
-
-## Run the dashboard
-
-The dashboard starts with the autonomous supervisor and provides the operator controls needed for
-approval requests. Docker users need Docker Engine with the Compose plugin. Running directly with
-uv requires uv itself and Python 3.13 or newer.
-
-Copy the example configuration and add credentials for an Instructor-supported model provider.
-
-```bash
-cp .env.example .env
-```
-
-```dotenv
-LLM_PROVIDER=your-provider
-LLM_MODEL=your-model-id
-LLM_API_KEY=your-api-key
-LLM_API_BASE=
-```
-
-`LLM_API_BASE` is optional and supports providers that expose a compatible custom endpoint.
-
-Start the container.
-
-```bash
-docker compose up --build
-```
-
-Open [http://localhost:8000](http://localhost:8000). The dashboard shows the current decision,
-rationale, typed arguments, experiment states, wait countdowns, delivered messages, pending
-approvals, and the complete tool timeline. Approval controls submit a LangGraph resume command for
-the suspended tool call. Dashboard events and LangGraph checkpoints persist in the Docker volume.
-
-To start the same dashboard directly with uv, run these commands.
-
-```bash
-uv sync
-uv run eventpilot dashboard
-```
-
-Use **Reset demo** in the header to cancel the current run, delete the supervisor thread through the
-LangGraph checkpointer, clear its event history, and start again. The container stays running.
 
 ## Time compression
 
