@@ -97,6 +97,8 @@ async def test_dashboard_serves_page_health_and_history() -> None:
     assert "EventPilot" in page.text
     assert "Current agent activity" in page.text
     assert "Reset demo" in page.text
+    assert ".activity { height:360px" in page.text
+    assert "#arguments { flex:1; min-height:52px; overflow:auto" in page.text
     assert "e.event==='cycle_finished'?'Cycle finished'" in page.text
     assert "e.event==='tool_result'&&e.tool==='send_alert'&&e.result?.message_id" in page.text
     assert health.json() == {"status": "ok"}

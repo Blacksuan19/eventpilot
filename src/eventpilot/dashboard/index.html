@@ -29,14 +29,17 @@
     .stack { display:grid; gap:16px; align-content:start; }
     .section-head { display:flex; justify-content:space-between; align-items:center; padding:16px 18px 12px; border-bottom:1px solid var(--line); }
     h2 { font-size:14px; margin:0; } .body { padding:18px; }
-    .activity { min-height:210px; position:relative; overflow:hidden; }
+    .activity { height:360px; position:relative; overflow:hidden; display:flex; flex-direction:column; }
+    .activity > .section-head { flex:none; }
+    .activity > .body { position:relative; z-index:1; min-height:0; flex:1; display:flex; flex-direction:column; }
     .activity:after { content:""; position:absolute; inset:auto -50px -90px auto; width:220px; height:220px; border-radius:50%; background:#60a5fa0d; filter:blur(3px); }
     .tool-row { display:flex; gap:10px; align-items:center; margin-bottom:13px; }
     .pill { border-radius:7px; padding:4px 8px; font:700 11px ui-monospace,SFMono-Regular,monospace; background:#eef5ff; color:#2459aa; border:1px solid #c8dcf7; }
     .model { color:var(--muted); font:12px ui-monospace,SFMono-Regular,monospace; }
-    .rationale { font-size:20px; line-height:1.35; max-width:850px; letter-spacing:-.02em; margin-bottom:16px; }
+    .rationale { flex:none; max-height:82px; overflow:auto; scrollbar-gutter:stable; font-size:20px; line-height:1.35; max-width:850px; letter-spacing:-.02em; margin-bottom:16px; }
     pre { white-space:pre-wrap; word-break:break-word; margin:0; color:#42546b; font:12px/1.55 ui-monospace,SFMono-Regular,monospace; }
-    .waitbox { display:none; margin-top:18px; } .waitmeta { display:flex; justify-content:space-between; color:var(--muted); font-size:12px; margin-bottom:7px; }
+    #arguments { flex:1; min-height:52px; overflow:auto; scrollbar-gutter:stable; padding:10px 12px; background:#f5f8fb; border:1px solid #e1e8ef; border-radius:8px; }
+    .waitbox { display:none; flex:none; margin-top:18px; } .waitmeta { display:flex; justify-content:space-between; color:var(--muted); font-size:12px; margin-bottom:7px; }
     .track { height:7px; background:#dce6ef; border-radius:9px; overflow:hidden; } .bar { height:100%; width:0; background:linear-gradient(90deg,var(--cyan),var(--blue)); transition:width .4s linear; }
     .filters { display:flex; gap:5px; } .filter { color:var(--muted); background:transparent; border:1px solid transparent; border-radius:7px; padding:4px 8px; cursor:pointer; font-size:11px; }
     .filter.active { color:var(--text); background:#edf3f8; border-color:#d5e0ea; }
