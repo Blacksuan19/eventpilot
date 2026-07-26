@@ -19,6 +19,7 @@ class ListExperiments(SourceToolCall):
 class GetExperiment(SourceToolCall):
     """Retrieve the current detailed representation of one Foundry experiment."""
 
+    parallel_safe = True
     tool: Literal["get_experiment"] = "get_experiment"
     experiment_id: str = Field(min_length=1, description="Foundry experiment identifier.")
 
@@ -26,6 +27,7 @@ class GetExperiment(SourceToolCall):
 class ListExperimentUpdates(SourceToolCall):
     """List chronological progress updates for one Foundry experiment."""
 
+    parallel_safe = True
     tool: Literal["list_experiment_updates"] = "list_experiment_updates"
     experiment_id: str = Field(min_length=1, description="Foundry experiment identifier.")
 
@@ -33,6 +35,7 @@ class ListExperimentUpdates(SourceToolCall):
 class ListExperimentResults(SourceToolCall):
     """List analysis results currently available for one Foundry experiment."""
 
+    parallel_safe = True
     tool: Literal["list_experiment_results"] = "list_experiment_results"
     experiment_id: str = Field(min_length=1, description="Foundry experiment identifier.")
 
@@ -71,6 +74,7 @@ class AcceptExperimentQuote(SourceToolCall):
 class GetExperimentQuote(SourceToolCall):
     """Retrieve price and expiry details for a Foundry experiment quote."""
 
+    parallel_safe = True
     tool: Literal["get_experiment_quote"] = "get_experiment_quote"
     availability = ToolAvailability(statuses=("QuoteSent",), evidence_keys=("detail_observed",))
     experiment_id: str = Field(min_length=1, description="Quoted experiment identifier.")

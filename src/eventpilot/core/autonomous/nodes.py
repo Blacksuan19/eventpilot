@@ -1,10 +1,10 @@
 """Node behavior for the autonomous LangGraph supervisor."""
 
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 
-from langgraph.types import Command, interrupt
+from langgraph.types import Command, Overwrite, Send, interrupt
 
 from eventpilot.core.agent_reasoning import (
     AgentTurn,
@@ -31,10 +31,12 @@ from eventpilot.core.monitoring import (
     validate_alert,
     validate_finish,
     validate_source_action,
+    validate_source_actions,
     validate_wait,
 )
 from eventpilot.core.notifications import Notification, NotificationPriority
 from eventpilot.core.reporting import (
+    AgentActionSelection,
     AgentDecisionEvent,
     AgentReporter,
     ApprovalRequestedEvent,
@@ -48,6 +50,8 @@ from eventpilot.sources.base import (
     DataSource,
     SourceContext,
     SourceToolCall,
+    parse_source_execution,
+    serialize_source_execution,
 )
 
 
@@ -85,7 +89,7 @@ class AutonomousGraphNodes:
         return state.get("source_state", initial_state())
 
     async def reason(self, state: AutonomousAgentState) -> AutonomousAgentState:
-        """Let the reasoning engine select one core or source-provided tool."""
+        """Let the reasoning engine select one control action or source-action batch."""
         source_state = self.source_state(state)
         turn = await self.agent.decide(state.get("transcript", []), source_state)
         self.reporter.emit(
@@ -94,9 +98,15 @@ class AutonomousGraphNodes:
                 cycle_count=state.get("cycle_count", 0),
                 tool_count=state.get("tool_count", 0),
                 rationale=turn.rationale,
-                tool=turn.action.tool_name,
-                action_model=type(turn.action).__name__,
-                arguments=turn.action.model_dump(mode="json", exclude={"tool"}),
+                actions=[
+                    AgentActionSelection(
+                        tool=action.tool_name,
+                        action_model=type(action).__name__,
+                        arguments=action.model_dump(mode="json", exclude={"tool"}),
+                    )
+                    for action in turn.actions
+                ],
+                parallel=len(turn.actions) > 1,
                 available_tools=sorted(
                     tool_type.model_fields["tool"].default
                     for tool_type in available_tool_types(
@@ -111,9 +121,30 @@ class AutonomousGraphNodes:
         )
         return {"turn": turn.model_dump(mode="json"), "outcome": "tool_selected"}
 
-    def route_tool(self, state: AutonomousAgentState) -> ToolRoute:
-        """Route the selected core or source tool to its graph node."""
-        action = _turn(state, self.source).action
+    def route_tool(self, state: AutonomousAgentState) -> ToolRoute | list[Send]:
+        """Route one action normally or fan independent source reads out with Send."""
+        turn = _turn(state, self.source)
+        if len(turn.actions) > 1:
+            if self.parallel_batch_rejection(turn.actions, self.source_state(state)):
+                return "reject_action"
+            return [
+                Send(
+                    "parallel_source_tool",
+                    {
+                        "turn": {
+                            "rationale": turn.rationale,
+                            "actions": [action.model_dump(mode="json")],
+                        },
+                        "source_state": self.source_state(state),
+                        "transcript": state.get("transcript", []),
+                        "cycle_count": state.get("cycle_count", 0),
+                        "tool_count": state.get("tool_count", 0),
+                        "parallel_action_index": index,
+                    },
+                )
+                for index, action in enumerate(turn.actions)
+            ]
+        action = _single_action(turn)
         if isinstance(action, SendAlert):
             return "send_alert"
         if isinstance(action, Wait):
@@ -134,9 +165,20 @@ class AutonomousGraphNodes:
             return "source_tool"
         return "reject_action"
 
+    def parallel_batch_rejection(
+        self, actions: list[SourceToolCall], source_state: dict[str, Any]
+    ) -> str | None:
+        """Reject batches that cannot safely share one pre-execution state snapshot."""
+        available = available_source_tools(self.source, source_state)
+        if any(action.tool_name not in available for action in actions):
+            return "Every parallel action must be an available source tool."
+        if any(not action.parallel_safe for action in actions):
+            return "Only source tools declared parallel-safe may share a turn."
+        return validate_source_actions(actions, source_state)
+
     async def execute_source_tool(self, state: AutonomousAgentState) -> AutonomousAgentState:
         """Execute one plugin-owned typed tool and reduce its normalized effects."""
-        action = _turn(state, self.source).action
+        action = _single_action(_turn(state, self.source))
         source_state = self.source_state(state)
         execution = await self.source.execute(
             action,
@@ -158,6 +200,60 @@ class AutonomousGraphNodes:
         self.report_tool_result(state, action, result, update)
         return update
 
+    async def execute_parallel_source_tool(
+        self, state: AutonomousAgentState
+    ) -> AutonomousAgentState:
+        """Execute one read-only Send branch without mutating shared monitoring state."""
+        action = _single_action(_turn(state, self.source))
+        execution = await self.source.execute(
+            action,
+            SourceContext(
+                state=self.source_state(state),
+                transcript=state.get("transcript", []),
+                clock=self.clock,
+            ),
+        )
+        return {
+            "parallel_results": [
+                {
+                    "index": state.get("parallel_action_index", 0),
+                    "action": action.model_dump(mode="json"),
+                    "execution": serialize_source_execution(execution),
+                    "observed_at": self.clock(),
+                }
+            ]
+        }
+
+    def reduce_parallel_source_tools(
+        self, state: AutonomousAgentState
+    ) -> AutonomousAgentState:
+        """Apply concurrent read results to durable state in original selection order."""
+        working = AutonomousAgentState(**state)
+        for item in sorted(state.get("parallel_results", []), key=lambda result: result["index"]):
+            action = self.source.parse_tool(item["action"])
+            execution = parse_source_execution(item["execution"])
+            result, next_source_state = apply_execution(
+                execution,
+                self.source_state(working),
+                observed_at=float(item["observed_at"]),
+            )
+            update = _tool_result(working, action, result)
+            update.update(
+                source_state=next_source_state,
+                pending_approval=None,
+                approval_decision=None,
+            )
+            self.report_tool_result(working, action, result, update)
+            working.update(update)
+        return {
+            "transcript": working.get("transcript", []),
+            "tool_count": working.get("tool_count", state.get("tool_count", 0)),
+            "source_state": self.source_state(working),
+            "pending_approval": None,
+            "approval_decision": None,
+            "outcome": "parallel_source_tools_completed",
+            "parallel_results": cast(Any, Overwrite([])),
+        }
     def choose_objective(self, state: AutonomousAgentState) -> AutonomousAgentState:
         """Validate and persist a generic monitoring objective in graph state."""
         action = _expect_action(state, self.source, SelectObjective)
@@ -170,7 +266,7 @@ class AutonomousGraphNodes:
     async def request_approval(self, state: AutonomousAgentState) -> AutonomousAgentState:
         """Deliver an approval request before the graph enters its interrupt node."""
         turn = _turn(state, self.source)
-        action = turn.action
+        action = _single_action(turn)
         if not isinstance(self.source, ApprovalAwareDataSource):
             raise TypeError(f"Source {self.source.name} does not define approval policy")
         requirement = self.source.approval_request(action, self.source_state(state))
@@ -241,7 +337,7 @@ class AutonomousGraphNodes:
 
     def reject_approval(self, state: AutonomousAgentState) -> AutonomousAgentState:
         """Record an operator rejection without executing the suspended source tool."""
-        action = _turn(state, self.source).action
+        action = _single_action(_turn(state, self.source))
         update = _rejected_tool_result(state, action, "The operator rejected this action.")
         update["source_state"] = record_rejected_action(action, self.source_state(state))
         update["pending_approval"] = None
@@ -342,15 +438,28 @@ class AutonomousGraphNodes:
         return update
 
     def reject_action(self, state: AutonomousAgentState) -> AutonomousAgentState:
-        """Reject an unavailable plugin tool without executing side effects."""
-        action = _turn(state, self.source).action
-        update = _rejected_tool_result(
-            state,
-            action,
-            f"Tool {action.tool_name} is unavailable in the current {self.source.name} state.",
+        """Reject unavailable or unsafe selected tools without executing side effects."""
+        turn = _turn(state, self.source)
+        reason = (
+            self.parallel_batch_rejection(turn.actions, self.source_state(state))
+            if len(turn.actions) > 1
+            else None
         )
-        self.report_tool_result(state, action, update.get("transcript", [])[-1]["result"], update)
-        return update
+        working = AutonomousAgentState(**state)
+        for action in turn.actions:
+            action_reason = reason or (
+                f"Tool {action.tool_name} is unavailable in the current {self.source.name} state."
+            )
+            update = _rejected_tool_result(working, action, action_reason)
+            self.report_tool_result(
+                working, action, update.get("transcript", [])[-1]["result"], update
+            )
+            working.update(update)
+        return {
+            "transcript": working.get("transcript", []),
+            "tool_count": working.get("tool_count", state.get("tool_count", 0)),
+            "outcome": working.get("outcome", "tools_rejected"),
+        }
 
     @staticmethod
     def route_cycle_end(state: AutonomousAgentState) -> Literal["end", "agent"]:
@@ -403,19 +512,28 @@ def _turn(state: AutonomousAgentState, source: DataSource) -> AgentTurn:
     raw_turn = state.get("turn")
     if raw_turn is None:
         raise ValueError("Tool execution requires an agent turn")
-    payload = raw_turn["action"]
-    action = parse_core_tool(payload) or source.parse_tool(payload)
-    return AgentTurn(rationale=raw_turn["rationale"], action=action)
+    payloads = raw_turn.get("actions")
+    if payloads is None:
+        payloads = [raw_turn["action"]]
+    actions = [parse_core_tool(payload) or source.parse_tool(payload) for payload in payloads]
+    return AgentTurn(rationale=raw_turn["rationale"], actions=actions)
 
 
 def _expect_action[ActionT: SourceToolCall](
     state: AutonomousAgentState, source: DataSource, kind: type[ActionT]
 ) -> ActionT:
     """Return a chosen action after verifying its dynamically routed type."""
-    action = _turn(state, source).action
+    action = _single_action(_turn(state, source))
     if not isinstance(action, kind):
         raise TypeError(f"Expected {kind.__name__}, received {type(action).__name__}")
     return action
+
+
+def _single_action(turn: AgentTurn) -> SourceToolCall:
+    """Return the sole action required by a serialized graph node."""
+    if len(turn.actions) != 1:
+        raise ValueError("This graph node requires exactly one action")
+    return turn.actions[0]
 
 
 def _tool_result(

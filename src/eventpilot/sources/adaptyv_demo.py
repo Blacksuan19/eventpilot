@@ -15,7 +15,11 @@ from eventpilot.adapters.adaptyv.tools import (
     UpdateExperiment,
 )
 from eventpilot.core.agent_reasoning import AgentTurn, FinishCycle, SendAlert, Wait
-from eventpilot.core.monitoring import SelectObjective
+from eventpilot.core.monitoring import (
+    SelectObjective,
+    pending_alert_resource_ids,
+    required_source_actions,
+)
 
 
 class DemoAdaptyvReasoningEngine:
@@ -27,6 +31,26 @@ class DemoAdaptyvReasoningEngine:
         """Choose a representative Foundry trajectory using only observed tool results."""
         if not transcript:
             return self._discovery_turn()
+
+        pending_alerts = pending_alert_resource_ids(source_state)
+        if pending_alerts:
+            experiment_id = pending_alerts[0]
+            result_count = source_state.get("evidence", {}).get(experiment_id, {}).get(
+                "result_count", 0
+            )
+            return AgentTurn(
+                rationale="Deliver the next inspected result waiting in the alert queue.",
+                action=SendAlert(
+                    resource_ids=[experiment_id],
+                    title=f"Experiment {experiment_id} results are ready",
+                    body=f"Foundry returned {result_count} available result(s).",
+                ),
+            )
+
+        required = required_source_actions(source_state)
+        if required:
+            experiment_id, tool = next(iter(required.items()))
+            return self._required_action_turn(experiment_id, tool, source_state)
 
         latest = transcript[-1]
         tool = latest["tool"]
@@ -55,10 +79,13 @@ class DemoAdaptyvReasoningEngine:
             )
 
         if tool == "select_objective":
-            experiment_id = latest["result"]["resource_ids"][0]
+            experiment_ids = latest["result"]["resource_ids"]
             return AgentTurn(
-                rationale="Inspect the experiment selected for this cycle.",
-                action=GetExperiment(experiment_id=experiment_id),
+                rationale="Inspect the independent experiments in this portfolio concurrently.",
+                actions=[
+                    GetExperiment(experiment_id=experiment_id)
+                    for experiment_id in experiment_ids
+                ],
             )
 
         if tool == "wait":
@@ -67,59 +94,58 @@ class DemoAdaptyvReasoningEngine:
                     rationale="The idle backoff completed without new work.",
                     action=FinishCycle(summary="No actionable experiments after idle backoff."),
                 )
-            candidates = source_state.get("next_resource_candidates", [])
-            experiment_id = (
-                candidates[0] if candidates else self._last_focused_experiment_id(transcript)
-            )
-            if experiment_id:
+            objective = source_state.get("objective") or {}
+            completed = set(source_state.get("completed_resource_ids", []))
+            experiment_ids = [
+                experiment_id
+                for experiment_id in objective.get("resource_ids", [])
+                if experiment_id not in completed
+            ]
+            if experiment_ids:
                 return AgentTurn(
-                    rationale="The polling interval elapsed; refresh the active experiment.",
-                    action=GetExperiment(experiment_id=experiment_id),
+                    rationale="The polling interval elapsed; refresh the portfolio concurrently.",
+                    actions=[
+                        GetExperiment(experiment_id=experiment_id)
+                        for experiment_id in experiment_ids
+                    ],
                 )
             return self._discovery_turn()
 
         if tool == "get_experiment":
-            experiment = latest["result"]
-            experiment_id = experiment["id"]
-            if experiment["status"] == ExperimentStatus.DRAFT:
-                replicates = experiment.get("experiment_spec", {}).get("n_replicates", 0)
-                requirement = (
-                    source_state.get("evidence", {})
-                    .get(experiment_id, {})
-                    .get("requirements", {})
-                    .get("submit_experiment", {})
-                )
-                minimum_replicates = int(requirement.get("minimum_replicates", 0))
-                if not requirement.get("satisfied", replicates >= minimum_replicates):
-                    return AgentTurn(
-                        rationale="The draft does not satisfy its submission requirements.",
-                        action=UpdateExperiment(
-                            experiment_id=experiment_id,
-                            changes=ModifyExperimentRequest(n_replicates=minimum_replicates),
-                        ),
-                    )
+            objective = source_state.get("objective") or {}
+            evidence = source_state.get("evidence", {})
+            ready_ids = [
+                experiment_id
+                for experiment_id in objective.get("resource_ids", [])
+                if evidence.get(experiment_id, {}).get("result_ready")
+                and not evidence.get(experiment_id, {}).get("results_observed")
+            ]
+            if ready_ids:
                 return AgentTurn(
-                    rationale="The draft satisfies submission policy.",
-                    action=SubmitExperiment(experiment_id=experiment_id),
+                    rationale="Read all independently available result payloads concurrently.",
+                    actions=[
+                        ListExperimentResults(experiment_id=experiment_id)
+                        for experiment_id in ready_ids
+                    ],
                 )
-            if experiment["status"] == ExperimentStatus.QUOTE_SENT:
+            delayed_ids = [
+                experiment_id
+                for experiment_id in objective.get("resource_ids", [])
+                if evidence.get(experiment_id, {}).get("status") == ExperimentStatus.DONE
+                and not evidence.get(experiment_id, {}).get("results_observed")
+                and not evidence.get(experiment_id, {}).get("updates_observed")
+            ]
+            if delayed_ids:
                 return AgentTurn(
-                    rationale="Read the quote price before requesting approval.",
-                    action=GetExperimentQuote(experiment_id=experiment_id),
-                )
-            if experiment["results_status"] in {"Partial", "All"}:
-                return AgentTurn(
-                    rationale="Results are available and must be inspected before alerting.",
-                    action=ListExperimentResults(experiment_id=experiment_id),
-                )
-            if experiment["status"] == ExperimentStatus.DONE:
-                return AgentTurn(
-                    rationale="The experiment is done but results are delayed; inspect updates.",
-                    action=ListExperimentUpdates(experiment_id=experiment_id),
+                    rationale="Inspect updates for terminal experiments whose results are delayed.",
+                    actions=[
+                        ListExperimentUpdates(experiment_id=experiment_id)
+                        for experiment_id in delayed_ids
+                    ],
                 )
             return AgentTurn(
-                rationale=f"The experiment remains active in {experiment['status']}.",
-                action=Wait(seconds=1, reason="Poll this active experiment again."),
+                rationale="The observed portfolio still contains active or delayed work.",
+                action=Wait(seconds=1, reason="Poll the active portfolio again."),
             )
 
         if tool == "update_experiment":
@@ -205,3 +231,41 @@ class DemoAdaptyvReasoningEngine:
             if entry["tool"] == "get_experiment":
                 return str(entry["result"]["id"])
         return None
+
+    @staticmethod
+    def _required_action_turn(
+        experiment_id: str, tool: str, source_state: dict[str, Any]
+    ) -> AgentTurn:
+        """Choose the source operation explicitly required by normalized evidence."""
+        if tool == "update_experiment":
+            requirement = (
+                source_state.get("evidence", {})
+                .get(experiment_id, {})
+                .get("requirements", {})
+                .get("submit_experiment", {})
+            )
+            return AgentTurn(
+                rationale="The draft does not satisfy its structured submission requirements.",
+                action=UpdateExperiment(
+                    experiment_id=experiment_id,
+                    changes=ModifyExperimentRequest(
+                        n_replicates=int(requirement.get("minimum_replicates", 0))
+                    ),
+                ),
+            )
+        if tool == "submit_experiment":
+            return AgentTurn(
+                rationale="The draft now satisfies its submission requirements.",
+                action=SubmitExperiment(experiment_id=experiment_id),
+            )
+        if tool == "get_experiment_quote":
+            return AgentTurn(
+                rationale="Read the quote price before requesting approval.",
+                action=GetExperimentQuote(experiment_id=experiment_id),
+            )
+        if tool == "accept_experiment_quote":
+            return AgentTurn(
+                rationale="The inspected quote is ready for an explicit operator decision.",
+                action=AcceptExperimentQuote(experiment_id=experiment_id),
+            )
+        raise ValueError(f"Unsupported required demo action: {tool}")

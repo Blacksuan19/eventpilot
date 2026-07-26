@@ -21,14 +21,21 @@ class AgentEvent(BaseModel):
         return str(self.model_dump()["event"])
 
 
-class AgentDecisionEvent(AgentEvent):
-    """Describe the validated intermediate action model selected by the agent."""
+class AgentActionSelection(BaseModel):
+    """Describe one typed action selected within an agent reasoning turn."""
 
-    event: Literal["agent_decision"] = "agent_decision"
-    rationale: str
     tool: str
     action_model: str
     arguments: dict[str, Any]
+
+
+class AgentDecisionEvent(AgentEvent):
+    """Describe the validated action batch selected by the agent."""
+
+    event: Literal["agent_decision"] = "agent_decision"
+    rationale: str
+    actions: list[AgentActionSelection] = Field(min_length=1)
+    parallel: bool
     available_tools: list[str]
     source_state: dict[str, Any]
 

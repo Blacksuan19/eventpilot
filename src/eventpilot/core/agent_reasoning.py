@@ -7,11 +7,12 @@ from typing import Annotated, Any, Literal, Protocol, cast
 
 import instructor
 from instructor import AsyncInstructor
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, create_model
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, create_model, model_validator
 
 from eventpilot.core.monitoring import (
     SelectObjective,
     available_source_tools,
+    pending_alert_resource_ids,
     required_source_actions,
     validate_finish,
     validate_wait,
@@ -26,7 +27,8 @@ class SendAlert(SourceToolCall):
 
     tool: Literal["send_alert"] = "send_alert"
     resource_ids: list[str] = Field(
-        min_length=1, description="Platform resource identifiers discussed in the alert."
+        min_length=1,
+        description="Platform resource identifiers discussed in the alert.",
     )
     title: str = Field(min_length=1, description="Concise operator-facing alert title.")
     body: str = Field(min_length=1, description="Evidence-based operator-facing alert body.")
@@ -59,12 +61,26 @@ CORE_TOOL_TYPES: tuple[type[SourceToolCall], ...] = (
 
 
 class AgentTurn(BaseModel):
-    """Represent one validated tool choice made by the autonomous agent."""
+    """Represent one validated set of tool choices made by the autonomous agent."""
 
     model_config = ConfigDict(frozen=True)
 
     rationale: str = Field(min_length=1)
-    action: SerializeAsAny[SourceToolCall]
+    actions: list[SerializeAsAny[SourceToolCall]] = Field(default_factory=list)
+    action: SerializeAsAny[SourceToolCall] | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def normalize_legacy_action(self) -> "AgentTurn":
+        """Normalize legacy singular callers while persisting only the action list."""
+        if self.action is not None and self.actions:
+            raise ValueError("Provide actions or legacy action, not both")
+        if self.action is not None:
+            object.__setattr__(self, "actions", [self.action])
+        if not self.actions:
+            raise ValueError("At least one action is required")
+        if len(self.actions) == 1:
+            object.__setattr__(self, "action", self.actions[0])
+        return self
 
 
 class AutonomousReasoningEngine(Protocol):
@@ -73,7 +89,7 @@ class AutonomousReasoningEngine(Protocol):
     async def decide(
         self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
     ) -> AgentTurn:
-        """Return exactly one typed tool call without executing it."""
+        """Return one or more typed tool calls without executing them."""
         ...
 
 
@@ -105,14 +121,14 @@ class InstructorAutonomousReasoningEngine:
     async def decide(
         self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
     ) -> AgentTurn:
-        """Ask the LLM to inspect source state and select one registered tool."""
+        """Ask the LLM to select one control action or independent source actions."""
         finish_rejection = validate_finish(source_state)
         if len(transcript) >= self._max_tool_calls_per_cycle and finish_rejection is None:
             return AgentTurn(
                 rationale="The cycle reached its tool budget and must yield to a fresh cycle.",
-                action=FinishCycle(
+                actions=[FinishCycle(
                     summary="Cycle tool budget reached; resume from fresh source evidence."
-                ),
+                )],
             )
         available_types = available_tool_types(
             self._source,
@@ -122,10 +138,12 @@ class InstructorAutonomousReasoningEngine:
         )
         action_union = reduce(or_, available_types)
         action_type = Annotated[action_union, Field(discriminator="tool")]
+        remaining_tool_calls = max(1, self._max_tool_calls_per_cycle - len(transcript))
+        actions_type = list[action_type]  # type: ignore[valid-type]
         response_model = create_model(
             f"{self._source.name.title().replace('-', '')}AvailableAgentTurn",
             rationale=(str, Field(min_length=1)),
-            action=(action_type, ...),
+            actions=(actions_type, Field(min_length=1, max_length=remaining_tool_calls)),
         )
         response: Any = await self._client.create(
             response_model=response_model,
@@ -146,8 +164,7 @@ class InstructorAutonomousReasoningEngine:
                                 for tool_type in available_types
                             ),
                             "tool_catalog": build_tool_catalog(available_types),
-                            "remaining_tool_calls": self._max_tool_calls_per_cycle
-                            - len(transcript),
+                            "remaining_tool_calls": remaining_tool_calls,
                             "source_state": source_state,
                             "tool_transcript": transcript,
                         }
@@ -156,7 +173,7 @@ class InstructorAutonomousReasoningEngine:
             ],
             max_retries=2,
         )
-        return AgentTurn(rationale=response.rationale, action=response.action)
+        return AgentTurn(rationale=response.rationale, actions=response.actions)
 
 
 def available_tool_types(
@@ -173,9 +190,11 @@ def available_tool_types(
         for tool_type in source.tool_types
         if tool_type.model_fields["tool"].default in source_names
     )
-    pending_alert = source_state.get("pending_alert_resource_id")
+    pending_alert = pending_alert_resource_ids(source_state)
     required_actions = required_source_actions(source_state)
-    core: tuple[type[SourceToolCall], ...] = (SendAlert,) if pending_alert else ()
+    core: tuple[type[SourceToolCall], ...] = (
+        (_pending_send_alert_type(pending_alert[0]),) if pending_alert else ()
+    )
     if not pending_alert and not required_actions:
         core = (SendAlert,)
     if not pending_alert and not required_actions and source_state.get("phase") == "objective":
@@ -187,11 +206,37 @@ def available_tool_types(
     return (*tools, *core)
 
 
+def _pending_send_alert_type(resource_id: str) -> type[SendAlert]:
+    """Constrain result delivery to the first resource in the graph-owned alert queue."""
+    literal_resource_id = Literal[resource_id]  # type: ignore[valid-type]
+    resource_ids_type = list[literal_resource_id]  # type: ignore[valid-type]
+    return cast(
+        type[SendAlert],
+        create_model(
+            "SendAlert",
+            __base__=SendAlert,
+            resource_ids=(
+                resource_ids_type,
+                Field(
+                    min_length=1,
+                    max_length=1,
+                    description=f"Exactly the next queued resource: {resource_id}.",
+                ),
+            ),
+        ),
+    )
+
+
 def build_tool_catalog(
     tool_types: tuple[type[SourceToolCall], ...],
 ) -> list[dict[str, Any]]:
     """Derive the agent-visible tool catalog directly from Pydantic schemas."""
-    return [tool_type.model_json_schema() for tool_type in tool_types]
+    catalog = []
+    for tool_type in tool_types:
+        schema = tool_type.model_json_schema()
+        schema["x-parallel-safe"] = tool_type.parallel_safe
+        catalog.append(schema)
+    return catalog
 
 
 def parse_core_tool(payload: dict[str, Any]) -> SourceToolCall | None:

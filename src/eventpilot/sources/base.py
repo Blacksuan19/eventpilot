@@ -1,7 +1,7 @@
 """Define the narrow contract implemented by platform data sources."""
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel
@@ -22,6 +22,7 @@ class SourceToolCall(BaseModel):
     """Provide the common discriminator required by every source tool."""
 
     availability: ClassVar[ToolAvailability | None] = None
+    parallel_safe: ClassVar[bool] = False
 
     @property
     def tool_name(self) -> str:
@@ -72,6 +73,34 @@ class SourceExecution:
 
     result: dict[str, Any]
     effects: tuple[SourceEffect, ...] = ()
+
+
+def serialize_source_execution(execution: SourceExecution) -> dict[str, Any]:
+    """Convert a source execution into checkpoint-safe graph state."""
+    return {
+        "result": execution.result,
+        "effects": [asdict(effect) for effect in execution.effects],
+    }
+
+
+def parse_source_execution(payload: Mapping[str, Any]) -> SourceExecution:
+    """Reconstruct a source execution after parallel LangGraph fan-in."""
+    effects = tuple(
+        SourceEffect(
+            kind=effect["kind"],
+            resources=tuple(ResourceSnapshot(**resource) for resource in effect["resources"]),
+            resource_id=effect["resource_id"],
+            evidence=effect["evidence"],
+            inspected=effect["inspected"],
+            result_ready=effect["result_ready"],
+            wait_blocker=effect["wait_blocker"],
+            clear_wait_blocker=effect["clear_wait_blocker"],
+            required_action=effect["required_action"],
+            clear_required_action=effect["clear_required_action"],
+        )
+        for effect in payload.get("effects", [])
+    )
+    return SourceExecution(result=dict(payload["result"]), effects=effects)
 
 
 class DataSource(Protocol):

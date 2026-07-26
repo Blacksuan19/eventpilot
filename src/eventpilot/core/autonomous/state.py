@@ -1,7 +1,8 @@
 """Shared state and callable contracts for the autonomous agent graph."""
 
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal, TypedDict
+from operator import add
+from typing import Annotated, Any, Literal, TypedDict
 
 
 class AutonomousAgentState(TypedDict, total=False):
@@ -16,6 +17,8 @@ class AutonomousAgentState(TypedDict, total=False):
     tool_count: int
     pending_approval: dict[str, Any] | None
     approval_decision: str | None
+    parallel_action_index: int
+    parallel_results: Annotated[list[dict[str, Any]], add]
 
 
 Sleep = Callable[[float], Awaitable[None]]

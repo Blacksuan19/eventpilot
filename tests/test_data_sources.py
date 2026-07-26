@@ -1,5 +1,6 @@
 """Prove the generic graph accepts tools from an unrelated monitoring source."""
 
+import asyncio
 from typing import Any, Literal
 
 from eventpilot.adapters.adaptyv.mock import MockFoundryClient
@@ -28,6 +29,7 @@ class ListWorkflowRuns(SourceToolCall):
 class GetWorkflowRun(SourceToolCall):
     """Inspect one GitHub Actions workflow run through a source-defined tool."""
 
+    parallel_safe = True
     tool: Literal["get_workflow_run"] = "get_workflow_run"
     run_id: str
 
@@ -124,6 +126,99 @@ class ScriptedGitHubAgent:
         return next(self._turns)
 
 
+class ParallelGitHubActionsTestSource(GitHubActionsTestSource):
+    """Expose two independent workflow reads and prove they overlap in execution."""
+
+    def __init__(self) -> None:
+        """Create a synchronization point and concurrency counters."""
+        self._both_started = asyncio.Event()
+        self._active = 0
+        self.max_active = 0
+
+    async def execute(self, action: SourceToolCall, context: SourceContext) -> SourceExecution:
+        """Block each detail read until both LangGraph Send branches have started."""
+        if isinstance(action, ListWorkflowRuns):
+            runs = [
+                {"id": run_id, "repository": action.repository, "conclusion": "failure"}
+                for run_id in ("4815", "4816")
+            ]
+            return SourceExecution(
+                result={"runs": runs, "total": len(runs)},
+                effects=(
+                    SourceEffect(
+                        "discovery",
+                        resources=tuple(
+                            ResourceSnapshot(
+                                resource_id=run["id"],
+                                status="failure",
+                                payload=run,
+                            )
+                            for run in runs
+                        ),
+                    ),
+                ),
+            )
+        if isinstance(action, GetWorkflowRun):
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+            if self._active == 2:
+                self._both_started.set()
+            await asyncio.wait_for(self._both_started.wait(), timeout=1)
+            execution = await super().execute(action, context)
+            self._active -= 1
+            return execution
+        return await super().execute(action, context)
+
+
+class ScriptedParallelGitHubAgent:
+    """Select two independent workflow reads in one reasoning turn."""
+
+    def __init__(self) -> None:
+        """Create a trajectory containing one parallel read batch."""
+        self._turns = iter(
+            [
+                AgentTurn(
+                    rationale="Discover failed workflow runs.",
+                    action=ListWorkflowRuns(repository="acme/widget"),
+                ),
+                AgentTurn(
+                    rationale="Monitor both discovered workflow runs.",
+                    action=SelectObjective(
+                        kind="monitor",
+                        resource_ids=["4815", "4816"],
+                        summary="Investigate both failed workflow runs.",
+                    ),
+                ),
+                AgentTurn(
+                    rationale="Inspect both independent failures concurrently.",
+                    actions=[GetWorkflowRun(run_id="4815"), GetWorkflowRun(run_id="4816")],
+                ),
+                AgentTurn(
+                    rationale="Report the first observed failure.",
+                    action=SendAlert(
+                        resource_ids=["4815"],
+                        title="GitHub Actions failure 4815",
+                        body="Workflow run 4815 failed in the tests job.",
+                    ),
+                ),
+                AgentTurn(
+                    rationale="Report the second observed failure.",
+                    action=SendAlert(
+                        resource_ids=["4816"],
+                        title="GitHub Actions failure 4816",
+                        body="Workflow run 4816 failed in the tests job.",
+                    ),
+                ),
+            ]
+        )
+
+    async def decide(
+        self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
+    ) -> AgentTurn:
+        """Return the next scripted single action or parallel action batch."""
+        return next(self._turns)
+
+
 class RecordingSink:
     """Capture the generic alert emitted from the GitHub-shaped source."""
 
@@ -157,6 +252,31 @@ async def test_graph_runs_github_actions_tools_without_platform_changes() -> Non
     assert sink.notifications[0].title == "GitHub Actions failure"
 
 
+async def test_graph_executes_independent_source_actions_in_parallel() -> None:
+    """Fan out independent source reads and reduce their effects in selection order."""
+    source = ParallelGitHubActionsTestSource()
+    sink = RecordingSink()
+    graph = build_autonomous_graph(ScriptedParallelGitHubAgent(), source, sink)
+
+    result = await AgentRuntime(graph).run(max_cycles=1)
+
+    assert source.max_active == 2
+    assert [entry["tool"] for entry in result.get("transcript", [])] == [
+        "list_workflow_runs",
+        "select_objective",
+        "get_workflow_run",
+        "get_workflow_run",
+        "send_alert",
+        "send_alert",
+    ]
+    assert [entry["call"]["run_id"] for entry in result.get("transcript", [])[2:4]] == [
+        "4815",
+        "4816",
+    ]
+    assert result.get("source_state", {}).get("completed_resource_ids") == ["4815", "4816"]
+    assert len(sink.notifications) == 2
+
+
 def test_data_source_publishes_structured_tool_descriptions() -> None:
     """Derive tool documentation from source schemas without handwritten signatures."""
     source = AdaptyvDataSource(MockFoundryClient.from_fixture())
@@ -169,3 +289,5 @@ def test_data_source_publishes_structured_tool_descriptions() -> None:
     assert list_schema["description"].startswith("List experiments visible")
     assert list_schema["properties"]["limit"]["description"] == "Maximum records to return."
     assert list_schema["properties"]["limit"]["maximum"] == 100
+    detail_schema = next(schema for schema in catalog if schema["title"] == "GetExperiment")
+    assert detail_schema["x-parallel-safe"] is True

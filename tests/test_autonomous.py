@@ -211,8 +211,8 @@ async def test_agent_discovers_polls_results_and_finishes_cycle() -> None:
     first_decision = next(
         event for event in reporter.events if isinstance(event, AgentDecisionEvent)
     )
-    assert first_decision.action_model == "ListExperiments"
-    assert first_decision.arguments == {"limit": 50, "offset": 0}
+    assert first_decision.actions[0].action_model == "ListExperiments"
+    assert first_decision.actions[0].arguments == {"limit": 50, "offset": 0}
     assert first_decision.available_tools == [
         "finish_cycle",
         "list_experiments",
@@ -374,8 +374,8 @@ async def test_agent_selects_the_discovered_experiment_portfolio() -> None:
     assert turn.action.resource_ids == ["complete", "active"]
 
 
-async def test_supervisor_completes_two_experiments_across_fresh_cycles() -> None:
-    """Prove the normal API collection is handled across fresh agent cycles."""
+async def test_supervisor_completes_two_experiments_then_starts_a_fresh_cycle() -> None:
+    """Process a portfolio concurrently, then prove the next cycle observes durable completion."""
     scenarios = [
         scenario_with_lifecycle(
             [ExperimentStatus.IN_QUEUE, ExperimentStatus.DONE], fixture_index=0
@@ -397,15 +397,18 @@ async def test_supervisor_completes_two_experiments_across_fresh_cycles() -> Non
 
     result = await AgentRuntime(graph).run(max_cycles=2)
 
-    assert foundry.inspected_ids == [experiment_ids[0], experiment_ids[1], experiment_ids[0]]
+    assert foundry.inspected_ids == [
+        experiment_ids[0],
+        experiment_ids[1],
+        experiment_ids[0],
+        experiment_ids[1],
+    ]
     assert [notification.title for notification in sink.notifications] == [
-        f"Experiment {experiment_ids[1]} results are ready",
         f"Experiment {experiment_ids[0]} results are ready",
+        f"Experiment {experiment_ids[1]} results are ready",
     ]
     assert result.get("cycle_count") == 2
-    assert result.get("source_state", {}).get("completed_resource_ids") == list(
-        reversed(experiment_ids)
-    )
+    assert result.get("source_state", {}).get("completed_resource_ids") == experiment_ids
 
 
 async def test_result_delivery_is_idempotent_across_fresh_cycles() -> None:

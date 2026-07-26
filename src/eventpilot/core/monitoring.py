@@ -43,13 +43,13 @@ def initial_state() -> dict[str, Any]:
         "poll_interval_seconds": None,
         "last_inspected_resource_id": None,
         "next_resource_candidates": [],
-        "pending_alert_resource_id": None,
+        "pending_alert_resource_ids": [],
     }
 
 
 def available_source_tools(source: DataSource, state: dict[str, Any]) -> set[str]:
     """Expose source tools valid in the graph's current monitoring phase."""
-    if state.get("pending_alert_resource_id"):
+    if pending_alert_resource_ids(state):
         return set()
     phase = state.get("phase", "discovery")
     if phase == "discovery":
@@ -136,7 +136,12 @@ def select_objective(
     return objective, updated
 
 
-def validate_source_action(action: SourceToolCall, state: dict[str, Any]) -> str | None:
+def validate_source_action(
+    action: SourceToolCall,
+    state: dict[str, Any],
+    *,
+    peer_resource_ids: set[str] | None = None,
+) -> str | None:
     """Reject scoped source actions that violate the active portfolio rotation."""
     resource_ids = action_resource_ids(action)
     if not resource_ids:
@@ -162,11 +167,34 @@ def validate_source_action(action: SourceToolCall, state: dict[str, Any]) -> str
     ):
         return "Resource does not satisfy the selected tool's current requirements."
     candidates = state.get("next_resource_candidates", [])
-    if candidates and resource_ids[0] == state.get("last_inspected_resource_id"):
+    covered_ids = set(resource_ids) | (peer_resource_ids or set())
+    if (
+        candidates
+        and resource_ids[0] == state.get("last_inspected_resource_id")
+        and not set(candidates).issubset(covered_ids)
+    ):
         return (
             "Inspect another portfolio resource before returning to this one. "
             f"Available candidates: {', '.join(candidates)}."
         )
+    return None
+
+
+def validate_source_actions(
+    actions: list[SourceToolCall], state: dict[str, Any]
+) -> str | None:
+    """Validate independent source actions against one pre-execution state snapshot."""
+    resource_groups = [action_resource_ids(action) for action in actions]
+    if any(not resource_ids for resource_ids in resource_groups):
+        return "Parallel source actions must each target a concrete resource."
+    flattened = [resource_id for group in resource_groups for resource_id in group]
+    if len(flattened) != len(set(flattened)):
+        return "Parallel source actions must target different resources."
+    peer_ids = set(flattened)
+    for action in actions:
+        rejection = validate_source_action(action, state, peer_resource_ids=peer_ids)
+        if rejection:
+            return rejection
     return None
 
 
@@ -189,11 +217,20 @@ def record_rejected_action(action: SourceToolCall, state: dict[str, Any]) -> dic
     return updated
 
 
+def pending_alert_resource_ids(state: dict[str, Any]) -> list[str]:
+    """Return queued result alerts while accepting the legacy singular checkpoint field."""
+    pending = state.get("pending_alert_resource_ids")
+    if isinstance(pending, list):
+        return [str(resource_id) for resource_id in pending]
+    legacy = state.get("pending_alert_resource_id")
+    return [str(legacy)] if legacy else []
+
+
 def validate_wait(state: dict[str, Any]) -> str | None:
     """Prevent waiting while normalized evidence requires immediate work."""
-    pending = state.get("pending_alert_resource_id")
+    pending = pending_alert_resource_ids(state)
     if pending:
-        return f"Result evidence for {pending} must be reported before waiting."
+        return f"Result evidence for {pending[0]} must be reported before waiting."
     blockers = [
         str(evidence["wait_blocker"])
         for evidence in state.get("evidence", {}).values()
@@ -226,9 +263,9 @@ def after_wait(state: dict[str, Any], *, requested_seconds: int, wake_at: float)
 
 def validate_alert(resource_ids: list[str], state: dict[str, Any]) -> str | None:
     """Require scoped, current normalized evidence before delivery."""
-    pending = state.get("pending_alert_resource_id")
-    if pending and resource_ids != [pending]:
-        return f"Report the pending result for {pending} in its own alert."
+    pending = pending_alert_resource_ids(state)
+    if pending and resource_ids != [pending[0]]:
+        return f"Report the pending result for {pending[0]} in its own alert."
     objective = state.get("objective") or {}
     if not set(resource_ids).issubset(set(objective.get("resource_ids", []))):
         return "Resource is outside objective scope."
@@ -282,7 +319,11 @@ def record_alert(
             record["last_reported_status"] = observed_status
         if next_interval is not None:
             record["next_poll_at"] = delivered_at + next_interval
-    updated["pending_alert_resource_id"] = None
+    pending = pending_alert_resource_ids(updated)
+    updated["pending_alert_resource_ids"] = [
+        resource_id for resource_id in pending if resource_id not in resource_ids
+    ]
+    updated.pop("pending_alert_resource_id", None)
     if not should_continue_after_alert(updated):
         updated = record_finish(updated)
     return updated
@@ -290,6 +331,8 @@ def record_alert(
 
 def should_continue_after_alert(state: dict[str, Any]) -> bool:
     """Continue when another objective resource already has inspected results."""
+    if pending_alert_resource_ids(state):
+        return True
     objective = state.get("objective") or {}
     completed = set(state.get("completed_resource_ids", []))
     evidence = state.get("evidence", {})
@@ -301,9 +344,9 @@ def should_continue_after_alert(state: dict[str, Any]) -> bool:
 
 def validate_finish(state: dict[str, Any]) -> str | None:
     """Reject completion while delivery or an idle wait remains outstanding."""
-    pending = state.get("pending_alert_resource_id")
+    pending = pending_alert_resource_ids(state)
     if pending:
-        return f"Result evidence for {pending} must be reported before finishing the cycle."
+        return f"Result evidence for {pending[0]} must be reported before finishing the cycle."
     required = required_source_actions(state)
     if required:
         resource_id, action = next(iter(required.items()))
@@ -323,8 +366,9 @@ def record_finish(state: dict[str, Any]) -> dict[str, Any]:
         poll_interval_seconds=None,
         last_inspected_resource_id=None,
         next_resource_candidates=[],
-        pending_alert_resource_id=None,
+        pending_alert_resource_ids=[],
     )
+    updated.pop("pending_alert_resource_id", None)
     return updated
 
 
@@ -379,7 +423,9 @@ def _apply_observation(effect: SourceEffect, state: dict[str, Any], observed_at:
         evidence.pop("required_action", None)
     if effect.result_ready:
         evidence["result_ready"] = True
-        state["pending_alert_resource_id"] = effect.resource_id
+        pending = pending_alert_resource_ids(state)
+        state["pending_alert_resource_ids"] = list(dict.fromkeys([*pending, effect.resource_id]))
+        state.pop("pending_alert_resource_id", None)
     if effect.inspected:
         monitoring = state.setdefault("monitoring", {}).setdefault(effect.resource_id, {})
         monitoring.update(last_checked_at=observed_at, last_observed_status=evidence.get("status"))
