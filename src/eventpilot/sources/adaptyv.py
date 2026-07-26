@@ -1,12 +1,9 @@
-"""Expose Adaptyv Foundry tools as a pluggable platform data source."""
+"""Expose the Adaptyv Foundry API as a pluggable agent data source."""
 
+from importlib.resources import files
 from typing import Any
 
-from eventpilot.adapters.adaptyv import (
-    ExperimentStatus,
-    FoundryClient,
-    FoundryToolAdapter,
-)
+from eventpilot.adapters.adaptyv import ExperimentStatus, FoundryClient
 from eventpilot.adapters.adaptyv.tools import (
     AcceptExperimentQuote,
     GetExperiment,
@@ -28,23 +25,36 @@ from eventpilot.sources.base import (
 
 
 class AdaptyvDataSource:
-    """Execute Foundry tools and translate responses into generic graph effects."""
+    """Expose Foundry API operations and normalize their effects for the agent."""
 
     name = "adaptyv-foundry"
     discovery_tool = "list_experiments"
+    tool_types: tuple[type[SourceToolCall], ...] = (
+        ListExperiments,
+        GetExperiment,
+        ListExperimentUpdates,
+        ListExperimentResults,
+        UpdateExperiment,
+        SubmitExperiment,
+        AcceptExperimentQuote,
+        GetExperimentQuote,
+    )
 
     def __init__(self, client: FoundryClient) -> None:
-        """Bind the source plugin to a real or fixture-backed Foundry client."""
-        self._adapter = FoundryToolAdapter(client)
-        self.tool_types: tuple[type[SourceToolCall], ...] = self._adapter.tool_types
-        self.instructions = self._adapter.instructions
-        self._tool_types = {
+        """Bind the agent data source to a real or fixture-backed Foundry API client."""
+        self._client = client
+        self.instructions = (
+            files("eventpilot.adapters.adaptyv")
+            .joinpath("instructions.txt")
+            .read_text(encoding="utf-8")
+        )
+        self._tool_type_registry = {
             tool_type.model_fields["tool"].default: tool_type for tool_type in self.tool_types
         }
 
     def parse_tool(self, payload: dict[str, Any]) -> SourceToolCall:
         """Validate a persisted Foundry tool call by its discriminator."""
-        tool_type = self._tool_types.get(payload.get("tool"))
+        tool_type = self._tool_type_registry.get(payload.get("tool"))
         if tool_type is None:
             raise ValueError(f"Unknown {self.name} tool: {payload.get('tool')}")
         return tool_type.model_validate(payload)
@@ -93,7 +103,8 @@ class AdaptyvDataSource:
 
     async def _list_experiments(self, action: ListExperiments) -> SourceExecution:
         """Discover Foundry experiments and normalize their lifecycle state."""
-        result = await self._adapter.execute(action)
+        page = await self._client.list_experiments(limit=action.limit, offset=action.offset)
+        result = page.model_dump(mode="json")
         resources = tuple(
             ResourceSnapshot(
                 resource_id=item["id"],
@@ -112,7 +123,8 @@ class AdaptyvDataSource:
 
     async def _get_experiment(self, action: GetExperiment) -> SourceExecution:
         """Fetch experiment detail and normalize current status evidence."""
-        result = await self._adapter.execute(action)
+        experiment = await self._client.get_experiment(action.experiment_id)
+        result = experiment.model_dump(mode="json")
         blocker = None
         if result["status"] == ExperimentStatus.DRAFT:
             blocker = f"Draft {action.experiment_id} must be prepared and submitted before waiting."
@@ -144,7 +156,8 @@ class AdaptyvDataSource:
         evidence = self._evidence(context, action.experiment_id)
         if evidence.get("status") not in {ExperimentStatus.DRAFT, ExperimentStatus.IN_REVIEW}:
             return self._rejected("Experiment is not editable.")
-        result = await self._adapter.execute(action)
+        experiment = await self._client.update_experiment(action.experiment_id, action.changes)
+        result = experiment.model_dump(mode="json")
         effect = SourceEffect(
             "observation",
             resource_id=action.experiment_id,
@@ -173,7 +186,8 @@ class AdaptyvDataSource:
             return self._rejected(
                 "Draft policy requires at least two replicates before submission."
             )
-        result = await self._adapter.execute(action)
+        confirmation = await self._client.submit_experiment(action.experiment_id)
+        result = confirmation.model_dump(mode="json")
         effect = SourceEffect(
             "observation",
             resource_id=action.experiment_id,
@@ -190,7 +204,8 @@ class AdaptyvDataSource:
         evidence = self._evidence(context, action.experiment_id)
         if evidence.get("status") != ExperimentStatus.QUOTE_SENT:
             return self._rejected("Experiment has no pending quote.")
-        result = await self._adapter.execute(action)
+        quote = await self._client.get_experiment_quote(action.experiment_id)
+        result = quote.model_dump(mode="json")
         effect = SourceEffect(
             "observation",
             resource_id=action.experiment_id,
@@ -209,7 +224,8 @@ class AdaptyvDataSource:
         evidence = self._evidence(context, action.experiment_id)
         if evidence.get("status") != ExperimentStatus.QUOTE_SENT:
             return self._rejected("Experiment has no pending quote.")
-        result = await self._adapter.execute(action)
+        confirmation = await self._client.accept_experiment_quote(action.experiment_id)
+        result = confirmation.model_dump(mode="json")
         effect = SourceEffect(
             "observation",
             resource_id=action.experiment_id,
@@ -225,7 +241,8 @@ class AdaptyvDataSource:
 
     async def _list_experiment_updates(self, action: ListExperimentUpdates) -> SourceExecution:
         """Fetch experiment updates and record endpoint inspection."""
-        result = await self._adapter.execute(action)
+        page = await self._client.list_experiment_updates(action.experiment_id)
+        result = page.model_dump(mode="json")
         effect = SourceEffect(
             "observation",
             resource_id=action.experiment_id,
@@ -236,7 +253,8 @@ class AdaptyvDataSource:
 
     async def _list_experiment_results(self, action: ListExperimentResults) -> SourceExecution:
         """Fetch experiment results and mark inspected operator-ready data."""
-        result = await self._adapter.execute(action)
+        page = await self._client.list_experiment_results(action.experiment_id)
+        result = page.model_dump(mode="json")
         effect = SourceEffect(
             "observation",
             resource_id=action.experiment_id,

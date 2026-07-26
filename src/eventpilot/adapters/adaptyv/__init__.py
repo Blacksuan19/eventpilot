@@ -12,7 +12,6 @@ from eventpilot.adapters.adaptyv.models import (
     ResultsStatus,
     UpdatePage,
 )
-from eventpilot.adapters.adaptyv.tools import FoundryToolAdapter
 
 __all__ = [
     "ExperimentPage",
@@ -21,7 +20,6 @@ __all__ = [
     "FoundryExperiment",
     "FoundryExperimentSummary",
     "FoundryResult",
-    "FoundryToolAdapter",
     "FoundryUpdate",
     "ResultPage",
     "ResultsStatus",

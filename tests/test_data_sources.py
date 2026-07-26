@@ -3,11 +3,12 @@
 from typing import Any, Literal
 
 from eventpilot.adapters.adaptyv.mock import MockFoundryClient
-from eventpilot.adapters.adaptyv.tools import FoundryToolAdapter, ListExperiments
+from eventpilot.adapters.adaptyv.tools import ListExperiments
 from eventpilot.core.agent_reasoning import AgentTurn, SendAlert, build_tool_catalog
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
 from eventpilot.core.monitoring import SelectObjective
 from eventpilot.core.notifications import DeliveryResult, Notification
+from eventpilot.sources.adaptyv import AdaptyvDataSource
 from eventpilot.sources.base import (
     ResourceSnapshot,
     SourceContext,
@@ -156,15 +157,15 @@ async def test_graph_runs_github_actions_tools_without_platform_changes() -> Non
     assert sink.notifications[0].title == "GitHub Actions failure"
 
 
-def test_adapter_publishes_structured_tool_descriptions() -> None:
-    """Derive tool documentation from adapter schemas without handwritten prompt signatures."""
-    adapter = FoundryToolAdapter(MockFoundryClient.from_fixture())
+def test_data_source_publishes_structured_tool_descriptions() -> None:
+    """Derive tool documentation from source schemas without handwritten signatures."""
+    source = AdaptyvDataSource(MockFoundryClient.from_fixture())
 
-    catalog = build_tool_catalog(adapter.tool_types)
+    catalog = build_tool_catalog(source.tool_types)
     list_schema = next(schema for schema in catalog if schema["title"] == "ListExperiments")
 
-    assert ListExperiments in adapter.tool_types
-    assert adapter.instructions.startswith("Data source: Adaptyv Foundry")
+    assert ListExperiments in source.tool_types
+    assert source.instructions.startswith("Data source: Adaptyv Foundry")
     assert list_schema["description"].startswith("List experiments visible")
     assert list_schema["properties"]["limit"]["description"] == "Maximum records to return."
     assert list_schema["properties"]["limit"]["maximum"] == 100
