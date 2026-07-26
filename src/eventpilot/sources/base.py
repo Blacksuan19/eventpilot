@@ -66,6 +66,7 @@ class SourceContext:
     state: dict[str, Any]
     transcript: list[dict[str, Any]]
     clock: Callable[[], float]
+    operation_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

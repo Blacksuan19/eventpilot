@@ -2,8 +2,8 @@
 
 from collections.abc import Callable
 from typing import Any, Literal, cast
-from uuid import uuid4
 
+from langgraph.runtime import Runtime
 from langgraph.types import Command, Overwrite, Send, interrupt
 
 from eventpilot.core.agent_reasoning import (
@@ -18,6 +18,7 @@ from eventpilot.core.agent_reasoning import (
 )
 from eventpilot.core.approvals import ApprovalDecision
 from eventpilot.core.autonomous.state import AutonomousAgentState, Sleep, ToolRoute
+from eventpilot.core.autonomous.tasks import DurableOperations
 from eventpilot.core.monitoring import (
     after_wait,
     apply_execution,
@@ -75,7 +76,6 @@ class AutonomousGraphNodes:
         """Bind node behavior to one graph's services and runtime policy."""
         self.agent = agent
         self.source = source
-        self.sink = sink
         self.destination = destination
         self.sleep = sleep
         self.idle_sleep = idle_sleep
@@ -83,10 +83,18 @@ class AutonomousGraphNodes:
         self.max_wait_seconds = max_wait_seconds
         self.max_tool_calls_per_cycle = max_tool_calls_per_cycle
         self.reporter = reporter
+        self.operations = DurableOperations(source, sink, clock)
 
     def source_state(self, state: AutonomousAgentState) -> dict[str, Any]:
         """Return persisted graph-owned monitoring state or a fresh state."""
         return state.get("source_state", initial_state())
+
+    @staticmethod
+    def operation_id(runtime: Runtime[Any]) -> str:
+        """Return the stable LangGraph task identity required by external operations."""
+        if runtime.execution_info is None:
+            raise RuntimeError("Durable operations require LangGraph execution metadata")
+        return runtime.execution_info.task_id
 
     async def reason(self, state: AutonomousAgentState) -> AutonomousAgentState:
         """Let the reasoning engine select one control action or source-action batch."""
@@ -178,20 +186,25 @@ class AutonomousGraphNodes:
             return "Only source tools declared parallel-safe may share a turn."
         return validate_source_actions(actions, source_state)
 
-    async def execute_source_tool(self, state: AutonomousAgentState) -> AutonomousAgentState:
+    async def execute_source_tool(
+        self, state: AutonomousAgentState, runtime: Runtime[Any]
+    ) -> AutonomousAgentState:
         """Execute one plugin-owned typed tool and reduce its normalized effects."""
         action = _single_action(_turn(state, self.source))
         source_state = self.source_state(state)
-        execution = await self.source.execute(
+        completed = await self.operations.execute_source(
             action,
             SourceContext(
                 state=source_state,
                 transcript=state.get("transcript", []),
                 clock=self.clock,
             ),
+            operation_id=f"{self.operation_id(runtime)}:source",
         )
         result, next_source_state = apply_execution(
-            execution, source_state, observed_at=self.clock()
+            completed.execution,
+            source_state,
+            observed_at=completed.observed_at,
         )
         update = _tool_result(state, action, result)
         update.update(
@@ -203,25 +216,26 @@ class AutonomousGraphNodes:
         return update
 
     async def execute_parallel_source_tool(
-        self, state: AutonomousAgentState
+        self, state: AutonomousAgentState, runtime: Runtime[Any]
     ) -> AutonomousAgentState:
         """Execute one read-only Send branch without mutating shared monitoring state."""
         action = _single_action(_turn(state, self.source))
-        execution = await self.source.execute(
+        completed = await self.operations.execute_source(
             action,
             SourceContext(
                 state=self.source_state(state),
                 transcript=state.get("transcript", []),
                 clock=self.clock,
             ),
+            operation_id=f"{self.operation_id(runtime)}:source",
         )
         return {
             "parallel_results": [
                 {
                     "index": state.get("parallel_action_index", 0),
                     "action": action.model_dump(mode="json"),
-                    "execution": serialize_source_execution(execution),
-                    "observed_at": self.clock(),
+                    "execution": serialize_source_execution(completed.execution),
+                    "observed_at": completed.observed_at,
                 }
             ]
         }
@@ -264,7 +278,9 @@ class AutonomousGraphNodes:
         self.report_tool_result(state, action, result, update)
         return update
 
-    async def request_approval(self, state: AutonomousAgentState) -> AutonomousAgentState:
+    async def request_approval(
+        self, state: AutonomousAgentState, runtime: Runtime[Any]
+    ) -> AutonomousAgentState:
         """Deliver an approval request before the graph enters its interrupt node."""
         turn = _turn(state, self.source)
         action = _single_action(turn)
@@ -274,14 +290,16 @@ class AutonomousGraphNodes:
         if requirement is None:
             raise ValueError(f"Tool {action.tool_name} does not require approval")
         arguments = action.model_dump(mode="json", exclude={"tool"})
-        approval_id = str(uuid4())
-        receipt = await self.sink.send(
+        operation_id = self.operation_id(runtime)
+        approval_id = f"approval-{operation_id}"
+        receipt = await self.operations.deliver_notification(
             self.destination,
             Notification(
                 title=requirement.title,
                 body=requirement.body,
                 priority=NotificationPriority.HIGH,
             ),
+            operation_id=f"{operation_id}:approval",
         )
         pending = {
             "id": approval_id,
@@ -346,7 +364,9 @@ class AutonomousGraphNodes:
         self.report_tool_result(state, action, update.get("transcript", [])[-1]["result"], update)
         return update
 
-    async def send_alert(self, state: AutonomousAgentState) -> AutonomousAgentState:
+    async def send_alert(
+        self, state: AutonomousAgentState, runtime: Runtime[Any]
+    ) -> AutonomousAgentState:
         """Deliver an alert and continue useful work within the current cycle."""
         action = _expect_action(state, self.source, SendAlert)
         source_state = self.source_state(state)
@@ -357,9 +377,10 @@ class AutonomousGraphNodes:
                 state, action, update.get("transcript", [])[-1]["result"], update
             )
             return update
-        receipt = await self.sink.send(
+        receipt = await self.operations.deliver_notification(
             self.destination,
             Notification(title=action.title, body=action.body, priority=action.priority),
+            operation_id=f"{self.operation_id(runtime)}:alert",
         )
         result = receipt.model_dump(mode="json")
         update = _tool_result(state, action, result)

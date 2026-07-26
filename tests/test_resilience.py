@@ -90,7 +90,13 @@ class NoopSink:
 
     channel_name = "noop"
 
-    async def send(self, destination: str, notification: Notification) -> DeliveryResult:
+    async def send(
+        self,
+        destination: str,
+        notification: Notification,
+        *,
+        idempotency_key: str,
+    ) -> DeliveryResult:
         """Return a stable receipt for an unused test notification path."""
         return DeliveryResult(channel=self.channel_name, message_id="unused")
 

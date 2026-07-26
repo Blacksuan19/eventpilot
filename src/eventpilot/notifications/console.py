@@ -10,7 +10,21 @@ class ConsoleNotificationSink:
 
     channel_name = "console"
 
-    async def send(self, destination: str, notification: Notification) -> DeliveryResult:
-        """Print a notification and return a synthetic provider message identifier."""
+    def __init__(self) -> None:
+        """Create an in-process delivery cache keyed by graph operation identity."""
+        self._deliveries: dict[str, DeliveryResult] = {}
+
+    async def send(
+        self,
+        destination: str,
+        notification: Notification,
+        *,
+        idempotency_key: str,
+    ) -> DeliveryResult:
+        """Print a notification once and return its stable synthetic receipt."""
+        if cached := self._deliveries.get(idempotency_key):
+            return cached
         print(f"[{notification.priority}] {notification.title}\n{notification.body}")
-        return DeliveryResult(channel=self.channel_name, message_id=str(uuid4()))
+        receipt = DeliveryResult(channel=self.channel_name, message_id=str(uuid4()))
+        self._deliveries[idempotency_key] = receipt
+        return receipt

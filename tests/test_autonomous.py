@@ -49,7 +49,13 @@ class RecordingSink:
         """Create an empty update history."""
         self.notifications: list[Notification] = []
 
-    async def send(self, destination: str, notification: Notification) -> DeliveryResult:
+    async def send(
+        self,
+        destination: str,
+        notification: Notification,
+        *,
+        idempotency_key: str,
+    ) -> DeliveryResult:
         """Store one delivered update and return its synthetic receipt."""
         self.notifications.append(notification)
         return DeliveryResult(channel=self.channel_name, message_id=str(len(self.notifications)))

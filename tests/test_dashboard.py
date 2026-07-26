@@ -136,3 +136,14 @@ async def test_dashboard_health_reports_agent_failure() -> None:
             "detail": "RuntimeError: model unavailable",
         },
     }
+
+
+def test_dashboard_store_deduplicates_replayed_event() -> None:
+    """Keep one semantic dashboard event when a graph node is replayed."""
+    store = DashboardEventStore()
+    event = decision_event()
+
+    store.emit(event)
+    store.emit(event.model_copy())
+
+    assert store.snapshot() == [event.model_dump(mode="json")]

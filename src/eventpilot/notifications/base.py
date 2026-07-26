@@ -10,6 +10,12 @@ class NotificationSink(Protocol):
 
     channel_name: str
 
-    async def send(self, destination: str, notification: Notification) -> DeliveryResult:
+    async def send(
+        self,
+        destination: str,
+        notification: Notification,
+        *,
+        idempotency_key: str,
+    ) -> DeliveryResult:
         """Deliver a notification to a preconfigured destination."""
         ...

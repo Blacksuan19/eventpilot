@@ -1,6 +1,7 @@
 """Serve typed agent events through a lightweight live dashboard."""
 
 import asyncio
+import hashlib
 import json
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -23,16 +24,18 @@ class DashboardEventStore:
     def __init__(self, *, max_events: int = 5_000, path: Path | None = None) -> None:
         """Create a bounded event history, optionally hydrated from durable JSON Lines."""
         self._events: deque[dict[str, Any]] = deque(maxlen=max_events)
+        self._fingerprints: set[str] = set()
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._path = path
         if path and path.exists():
             for line in path.read_text(encoding="utf-8").splitlines()[-max_events:]:
-                self._events.append(json.loads(line))
+                self._append(json.loads(line))
 
     def emit(self, event: AgentEvent) -> None:
         """Store and broadcast one complete typed runtime event."""
         payload = event.model_dump(mode="json")
-        self._events.append(payload)
+        if not self._append(payload):
+            return
         if self._path:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             with self._path.open("a", encoding="utf-8") as event_log:
@@ -47,8 +50,27 @@ class DashboardEventStore:
     def clear(self) -> None:
         """Remove retained and durable events for a fresh demonstration run."""
         self._events.clear()
+        self._fingerprints.clear()
         if self._path:
             self._path.unlink(missing_ok=True)
+
+    def _append(self, payload: dict[str, Any]) -> bool:
+        """Append one semantic event unless durable replay already recorded it."""
+        fingerprint = self._fingerprint(payload)
+        if fingerprint in self._fingerprints:
+            return False
+        if len(self._events) == self._events.maxlen:
+            self._fingerprints.discard(self._fingerprint(self._events[0]))
+        self._events.append(payload)
+        self._fingerprints.add(fingerprint)
+        return True
+
+    @staticmethod
+    def _fingerprint(payload: dict[str, Any]) -> str:
+        """Hash event meaning while ignoring its replay-dependent timestamp."""
+        semantic_payload = {key: value for key, value in payload.items() if key != "timestamp"}
+        encoded = json.dumps(semantic_payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
 
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
         """Register and return a queue for one live browser connection."""

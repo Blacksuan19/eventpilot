@@ -228,7 +228,13 @@ class RecordingSink:
         """Create an empty notification collection."""
         self.notifications: list[Notification] = []
 
-    async def send(self, destination: str, notification: Notification) -> DeliveryResult:
+    async def send(
+        self,
+        destination: str,
+        notification: Notification,
+        *,
+        idempotency_key: str,
+    ) -> DeliveryResult:
         """Record one alert and return a successful delivery receipt."""
         self.notifications.append(notification)
         return DeliveryResult(channel=self.channel_name, message_id="1")
