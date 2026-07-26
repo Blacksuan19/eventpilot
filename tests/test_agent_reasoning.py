@@ -88,9 +88,7 @@ def test_wait_schema_exposes_the_runtime_ceiling() -> None:
 
     tool_types = available_tool_types(source, initial_state(), max_wait_seconds=900)
     wait_type = next(
-        tool_type
-        for tool_type in tool_types
-        if tool_type.model_fields["tool"].default == "wait"
+        tool_type for tool_type in tool_types if tool_type.model_fields["tool"].default == "wait"
     )
 
     assert wait_type.model_json_schema()["properties"]["seconds"]["maximum"] == 900

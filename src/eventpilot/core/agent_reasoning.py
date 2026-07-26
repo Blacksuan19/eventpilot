@@ -38,9 +38,7 @@ class SendAlert(SourceToolCall):
         description="Platform resource identifiers discussed in the alert.",
     )
     title: str = Field(min_length=1, description="Concise operator-facing alert title.")
-    body: str = Field(
-        min_length=1, description="Evidence-based operator-facing alert body."
-    )
+    body: str = Field(min_length=1, description="Evidence-based operator-facing alert body.")
     priority: NotificationPriority = Field(
         default=NotificationPriority.NORMAL, description="Delivery urgency."
     )
@@ -190,17 +188,9 @@ def available_tool_types(
     )
     if not pending_alert and not required_actions:
         core = (SendAlert,)
-    if (
-        not pending_alert
-        and not required_actions
-        and source_state.get("phase") == "objective"
-    ):
+    if not pending_alert and not required_actions and source_state.get("phase") == "objective":
         core += (SelectObjective,)
-    if (
-        not pending_alert
-        and not required_actions
-        and validate_wait(source_state) is None
-    ):
+    if not pending_alert and not required_actions and validate_wait(source_state) is None:
         core += ((_bounded_wait_type(max_wait_seconds) if max_wait_seconds else Wait),)
     return (*tools, *core)
 
@@ -217,9 +207,7 @@ def _bounded_wait_type(max_wait_seconds: int) -> type[Wait]:
                 Field(
                     ge=1,
                     le=max_wait_seconds,
-                    description=(
-                        "Requested polling delay in seconds, bounded by runtime policy."
-                    ),
+                    description=("Requested polling delay in seconds, bounded by runtime policy."),
                 ),
             ),
         ),
@@ -262,8 +250,7 @@ def build_tool_catalog(
 def parse_core_tool(payload: dict[str, Any]) -> SourceToolCall | None:
     """Validate a persisted core tool payload, returning none for source tools."""
     tool_types = {
-        tool_type.model_fields["tool"].default: tool_type
-        for tool_type in CORE_TOOL_TYPES
+        tool_type.model_fields["tool"].default: tool_type for tool_type in CORE_TOOL_TYPES
     }
     tool_type = tool_types.get(payload.get("tool"))
     return tool_type.model_validate(payload) if tool_type else None

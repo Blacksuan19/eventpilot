@@ -297,9 +297,7 @@ async def test_runtime_restart_resumes_only_the_remaining_wait() -> None:
     first_run.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first_run
-    snapshot = await first_graph.aget_state(
-        {"configurable": {"thread_id": AgentRuntime.thread_id}}
-    )
+    snapshot = await first_graph.aget_state({"configurable": {"thread_id": AgentRuntime.thread_id}})
     assert snapshot.next == ("wait",)
     assert snapshot.values["pending_wait"]["wake_at"] == 110
 

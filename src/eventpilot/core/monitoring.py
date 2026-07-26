@@ -180,9 +180,7 @@ def validate_source_action(
     return None
 
 
-def validate_source_actions(
-    actions: list[SourceToolCall], state: dict[str, Any]
-) -> str | None:
+def validate_source_actions(actions: list[SourceToolCall], state: dict[str, Any]) -> str | None:
     """Validate independent source actions against one pre-execution state snapshot."""
     resource_groups = [action_resource_ids(action) for action in actions]
     if any(not resource_ids for resource_ids in resource_groups):

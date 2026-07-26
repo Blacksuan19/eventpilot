@@ -8,9 +8,7 @@ from pydantic import ValidationError
 from eventpilot.config import Settings
 
 
-def test_max_wait_defaults_to_one_hour(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_max_wait_defaults_to_one_hour(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Keep unattended source discovery active at least once per hour."""
     monkeypatch.delenv("EVENTPILOT_MAX_WAIT_SECONDS", raising=False)
     monkeypatch.chdir(tmp_path)

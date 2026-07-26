@@ -246,9 +246,7 @@ async def test_graph_runs_github_actions_tools_without_platform_changes() -> Non
     """Execute non-Adaptyv tools through the unchanged generic autonomous graph."""
     source = GitHubActionsTestSource()
     sink = RecordingSink()
-    graph = build_autonomous_graph(
-        ScriptedGitHubAgent(), source, sink, max_wait_seconds=3_600
-    )
+    graph = build_autonomous_graph(ScriptedGitHubAgent(), source, sink, max_wait_seconds=3_600)
 
     result = await AgentRuntime(graph).run(max_invocations=1)
 

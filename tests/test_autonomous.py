@@ -517,7 +517,7 @@ async def test_result_delivery_is_idempotent_across_fresh_invocations() -> None:
             AgentTurn(
                 rationale="Scope result delivery.",
                 action=SelectObjective(
-            kind="notify",
+                    kind="notify",
                     resource_ids=[experiment_id],
                     summary="Report available results.",
                 ),
@@ -568,7 +568,7 @@ async def test_result_alerts_cannot_group_experiments() -> None:
             AgentTurn(
                 rationale="Group related completed results.",
                 action=SelectObjective(
-            kind="notify",
+                    kind="notify",
                     resource_ids=experiment_ids,
                     summary="Report both completed experiments.",
                 ),
@@ -994,9 +994,7 @@ async def test_agent_handles_fuzzed_experiment_collections(seed: int) -> None:
         reporter=reporter,
     )
 
-    result = await run_with_approved_interrupts(
-        AgentRuntime(graph), reporter, max_invocations=32
-    )
+    result = await run_with_approved_interrupts(AgentRuntime(graph), reporter, max_invocations=32)
 
     completed_ids = result.get("source_state", {}).get("completed_resource_ids", [])
     result_notifications = [
