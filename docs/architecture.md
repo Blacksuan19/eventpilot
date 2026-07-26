@@ -23,8 +23,8 @@ delivery, and completed resource IDs. Platform tools translate API responses int
 `SourceEffect` values that the graph reduces into this durable state.
 
 Instructor builds its response model and agent-visible catalog directly from Pydantic schemas
-published by the adapter, source, and core. Names, arguments, constraints, and descriptions are not
-duplicated in prompts. Adding or replacing an adapter therefore changes the LLM's validated tool
+published by the data source and core. Names, arguments, constraints, and descriptions are not
+duplicated in prompts. Adding or replacing a data source therefore changes the LLM's validated tool
 set without adding graph nodes or routing branches.
 
 Each source tool declares whether it is safe to execute concurrently. One reasoning turn may select
@@ -34,11 +34,12 @@ order. Control tools, writes, approvals, and overlapping resource calls remain s
 
 ## Data-source contract
 
-A platform adapter publishes typed API operations and instructions, then executes those operations
-through its client transport. The data source provides:
+A platform integration defines typed API models, a client protocol, tool schemas, and source
+instructions. The data source invokes the injected client and translates each response into generic
+monitoring effects. The data source provides:
 
-- A stable name and the adapter-provided instructions.
-- A discovery tool and source-owned tool models with unique `tool` discriminators.
+- A stable name and platform-specific instructions.
+- A discovery tool and registered tool models with unique `tool` discriminators.
 - Declarative evidence prerequisites for tools with lifecycle constraints.
 - Parsing and execution for every registered tool.
 - Normalized discovery and observation effects returned by tool execution.
@@ -56,8 +57,8 @@ availability, workflow conclusions, incident severity, and similar platform conc
 the source-owned evidence mapping.
 
 A GitHub Actions plugin, for example, could register `list_workflow_runs`, `get_workflow_run`,
-`list_run_jobs`, and `rerun_workflow` models. Its handlers could call `gh` through an injected CLI
-adapter. Its list operation would emit discovered `ResourceSnapshot` values and detail operations
+`list_run_jobs`, and `rerun_workflow` models. Its data source could call `gh` through an injected CLI
+client. Its list operation would emit discovered `ResourceSnapshot` values and detail operations
 would emit observations. The graph and notification provider would remain unchanged.
 
 ## Core tools
@@ -88,15 +89,16 @@ retains the complete records and broadcasts them over server-sent events to a re
 with current activity, wait progress, source state, alerts, and an expandable timeline. Both
 reporters observe the same execution through a composite reporter; neither controls the graph.
 
-The console view summarizes large result
-collections and state maps while custom reporters receive the complete typed events and can forward
-them to tracing, metrics, or audit storage without changing the graph.
+The console view summarizes large result collections and state maps while custom reporters receive
+the complete typed events and can forward them to tracing, metrics, or audit storage without
+changing the graph.
 
 ## Adaptyv plugin
 
-`FoundryToolAdapter` publishes and executes Foundry list, detail, update, and result operations.
-`AdaptyvDataSource` executes those operations and translates Foundry responses into generic
-resource snapshots and observations. It retains only Foundry-specific behavior:
+The Adaptyv adapter package defines API-shaped Pydantic models, the `FoundryClient` protocol, typed
+tool calls, and platform instructions. `AdaptyvDataSource` registers those tools, calls the injected
+client, and translates Foundry responses into generic resource snapshots and observations. It
+retains only Foundry-specific behavior:
 
 - API response normalization.
 - Editable and submittable experiment preconditions.
