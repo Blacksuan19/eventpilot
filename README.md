@@ -337,6 +337,24 @@ register the sink when constructing the autonomous agent. Its credentials and
 destination remain trusted runtime configuration outside the source and LLM tool
 schemas.
 
+## Future work
+
+- Add webhook ingress for platforms that publish lifecycle events. A receiver
+  would validate each provider payload, identify its source and resource, and
+  wake the corresponding durable graph thread. Scheduled discovery would cover
+  dropped events and platforms without webhook support.
+- Implement notification sinks for Slack, Telegram, email, SMS, and operator
+  platforms.
+- Support multiple configured data sources with independent schedules, durable
+  threads, approval queues, and delivery policies.
+- Export model usage, graph traces, tool latency, wait duration, and approval
+  latency through OpenTelemetry-compatible reporting.
+- Add an evaluation harness that replays source fixtures across model and prompt
+  versions, then measures tool selection, reporting latency, duplicate delivery,
+  and approval safety.
+- Add production persistence and worker coordination through a shared
+  checkpointer, durable event storage, and runtime leases.
+
 ## Project layout
 
 ```text
