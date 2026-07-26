@@ -207,6 +207,7 @@ async def test_agent_discovers_polls_results_across_persisted_invocations() -> N
         DemoAdaptyvReasoningEngine(),
         AdaptyvDataSource(foundry),
         sink,
+        max_wait_seconds=3_600,
         sleep=clock.sleep,
         clock=clock,
         reporter=reporter,
@@ -263,6 +264,7 @@ async def test_agent_investigates_updates_while_completed_results_are_delayed() 
         DemoAdaptyvReasoningEngine(),
         AdaptyvDataSource(foundry),
         sink,
+        max_wait_seconds=3_600,
         sleep=clock.sleep,
         clock=clock,
         reporter=reporter,
@@ -327,6 +329,7 @@ async def test_idle_agent_waits_without_sending_an_update() -> None:
         agent,
         AdaptyvDataSource(foundry),
         sink,
+        max_wait_seconds=3_600,
         sleep=clock.sleep,
         clock=clock,
     )
@@ -346,6 +349,47 @@ async def test_idle_agent_waits_without_sending_an_update() -> None:
     assert result.get("invocation_summary") == "Waited 60 seconds before the next invocation."
     assert sink.notifications == []
     assert clock.waits == [60]
+
+
+async def test_wait_is_clamped_to_the_runtime_ceiling() -> None:
+    """Apply the configured logical ceiling while retaining the model's request."""
+    reporter = RecordingReporter()
+    requested_seconds = 1_800
+    foundry, clock = timed_foundry([scenario_with_lifecycle([ExperimentStatus.DONE])])
+    graph = build_autonomous_graph(
+        ScriptedAgent(
+            [
+                AgentTurn(
+                    rationale="No work is active.",
+                    action=Wait(seconds=requested_seconds, reason="Idle."),
+                )
+            ]
+        ),
+        AdaptyvDataSource(foundry),
+        RecordingSink(),
+        sleep=clock.sleep,
+        clock=clock,
+        max_wait_seconds=900,
+        reporter=reporter,
+    )
+
+    result = await graph.ainvoke(
+        {"transcript": [], "source_state": {**initial_state(), "phase": "idle"}},
+        config={"configurable": {"thread_id": "bounded-idle-test"}},
+    )
+
+    wait_event = next(
+        event
+        for event in reporter.events
+        if isinstance(event, ToolResultEvent) and event.tool == "wait"
+    )
+    assert clock.waits == [900]
+    assert wait_event.requested_wait_seconds == requested_seconds
+    assert wait_event.elapsed_wait_seconds == 900
+    assert wait_event.result["requested_seconds"] == requested_seconds
+    assert wait_event.result["elapsed_seconds"] == 900
+    assert result["source_state"]["poll_interval_seconds"] == 900
+    assert result["invocation_summary"] == "Waited 900 seconds before the next invocation."
 
 
 async def test_completed_portfolio_uses_the_unbounded_idle_wait() -> None:
@@ -383,6 +427,7 @@ async def test_completed_portfolio_uses_the_unbounded_idle_wait() -> None:
         ),
         AdaptyvDataSource(MockFoundryClient.from_fixture()),
         RecordingSink(),
+        max_wait_seconds=3_600,
         sleep=active_sleep,
         idle_sleep=idle_sleep,
     )
@@ -441,6 +486,7 @@ async def test_supervisor_completes_two_experiments_across_invocations() -> None
         DemoAdaptyvReasoningEngine(),
         AdaptyvDataSource(foundry),
         sink,
+        max_wait_seconds=3_600,
         sleep=clock.sleep,
         clock=clock,
     )
@@ -497,6 +543,7 @@ async def test_result_delivery_is_idempotent_across_fresh_invocations() -> None:
         agent,
         AdaptyvDataSource(foundry),
         sink,
+        max_wait_seconds=3_600,
         sleep=clock.sleep,
         clock=clock,
     )
@@ -563,7 +610,12 @@ async def test_result_alerts_cannot_group_experiments() -> None:
     sink = RecordingSink()
     foundry, clock = timed_foundry(scenarios)
     graph = build_autonomous_graph(
-        agent, AdaptyvDataSource(foundry), sink, sleep=clock.sleep, clock=clock
+        agent,
+        AdaptyvDataSource(foundry),
+        sink,
+        max_wait_seconds=3_600,
+        sleep=clock.sleep,
+        clock=clock,
     )
 
     result = await AgentRuntime(graph).run(max_invocations=1)
@@ -609,7 +661,12 @@ async def test_ready_result_blocks_wait_until_reported() -> None:
     foundry, clock = timed_foundry([scenario])
     sink = RecordingSink()
     graph = build_autonomous_graph(
-        agent, AdaptyvDataSource(foundry), sink, sleep=clock.sleep, clock=clock
+        agent,
+        AdaptyvDataSource(foundry),
+        sink,
+        max_wait_seconds=3_600,
+        sleep=clock.sleep,
+        clock=clock,
     )
 
     result = await AgentRuntime(graph).run(max_invocations=1)
@@ -680,7 +737,12 @@ async def test_graph_requires_a_complete_monitoring_portfolio() -> None:
     foundry, clock = timed_foundry(scenarios)
     sink = RecordingSink()
     graph = build_autonomous_graph(
-        agent, AdaptyvDataSource(foundry), sink, sleep=clock.sleep, clock=clock
+        agent,
+        AdaptyvDataSource(foundry),
+        sink,
+        max_wait_seconds=3_600,
+        sleep=clock.sleep,
+        clock=clock,
     )
 
     result = await AgentRuntime(graph).run(max_invocations=1)
@@ -747,7 +809,12 @@ async def test_graph_accepts_multi_experiment_monitor_objective() -> None:
     sink = RecordingSink()
     foundry, clock = timed_foundry(scenarios)
     graph = build_autonomous_graph(
-        agent, AdaptyvDataSource(foundry), sink, sleep=clock.sleep, clock=clock
+        agent,
+        AdaptyvDataSource(foundry),
+        sink,
+        max_wait_seconds=3_600,
+        sleep=clock.sleep,
+        clock=clock,
     )
 
     result = await AgentRuntime(graph).run(max_invocations=1)
@@ -818,7 +885,12 @@ async def test_active_monitor_requires_agent_selected_wait_before_reporting() ->
     sink = RecordingSink()
     foundry, clock = timed_foundry([scenario])
     graph = build_autonomous_graph(
-        agent, AdaptyvDataSource(foundry), sink, sleep=clock.sleep, clock=clock
+        agent,
+        AdaptyvDataSource(foundry),
+        sink,
+        max_wait_seconds=3_600,
+        sleep=clock.sleep,
+        clock=clock,
     )
 
     result = await AgentRuntime(graph).run(max_invocations=3)
@@ -855,6 +927,7 @@ async def test_sqlite_checkpoint_survives_fresh_invocations(tmp_path: Path) -> N
             DemoAdaptyvReasoningEngine(),
             AdaptyvDataSource(first_foundry),
             sink,
+            max_wait_seconds=3_600,
             checkpointer=checkpointer,
             sleep=first_clock.sleep,
             clock=first_clock,
@@ -876,6 +949,7 @@ async def test_sqlite_checkpoint_survives_fresh_invocations(tmp_path: Path) -> N
             DemoAdaptyvReasoningEngine(),
             AdaptyvDataSource(restarted_foundry),
             sink,
+            max_wait_seconds=3_600,
             checkpointer=checkpointer,
             sleep=restarted_clock.sleep,
             clock=restarted_clock,
@@ -914,6 +988,7 @@ async def test_agent_handles_fuzzed_experiment_collections(seed: int) -> None:
         DemoAdaptyvReasoningEngine(),
         AdaptyvDataSource(foundry),
         sink,
+        max_wait_seconds=3_600,
         sleep=clock.sleep,
         clock=clock,
         reporter=reporter,

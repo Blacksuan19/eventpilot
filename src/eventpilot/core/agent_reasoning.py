@@ -7,8 +7,16 @@ from typing import Annotated, Any, Literal, Protocol, cast
 
 import instructor
 from instructor import AsyncInstructor
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, create_model, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializeAsAny,
+    create_model,
+    model_validator,
+)
 
+from eventpilot.config import get_settings
 from eventpilot.core.monitoring import (
     SelectObjective,
     available_source_tools,
@@ -30,7 +38,9 @@ class SendAlert(SourceToolCall):
         description="Platform resource identifiers discussed in the alert.",
     )
     title: str = Field(min_length=1, description="Concise operator-facing alert title.")
-    body: str = Field(min_length=1, description="Evidence-based operator-facing alert body.")
+    body: str = Field(
+        min_length=1, description="Evidence-based operator-facing alert body."
+    )
     priority: NotificationPriority = Field(
         default=NotificationPriority.NORMAL, description="Delivery urgency."
     )
@@ -40,7 +50,11 @@ class Wait(SourceToolCall):
     """Pause current work before allowing the agent to select another tool."""
 
     tool: Literal["wait"] = "wait"
-    seconds: int = Field(ge=1, le=86_400, description="Requested polling delay in seconds.")
+    seconds: int = Field(
+        ge=1,
+        le=get_settings().max_wait_seconds,
+        description="Requested polling delay in seconds.",
+    )
     reason: str = Field(min_length=1, description="Why current work requires a pause.")
 
 
@@ -92,6 +106,7 @@ class InstructorAutonomousReasoningEngine:
         model: str,
         source: DataSource,
         *,
+        max_wait_seconds: int,
         api_key: str | None = None,
         api_base: str | None = None,
     ) -> None:
@@ -106,12 +121,17 @@ class InstructorAutonomousReasoningEngine:
             instructor.from_provider(model, async_client=True, **options),
         )
         self._source = source
+        self._max_wait_seconds = max_wait_seconds
 
     async def decide(
         self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
     ) -> AgentTurn:
         """Ask the LLM to select one control action or independent source actions."""
-        available_types = available_tool_types(self._source, source_state)
+        available_types = available_tool_types(
+            self._source,
+            source_state,
+            max_wait_seconds=self._max_wait_seconds,
+        )
         action_union = reduce(or_, available_types)
         action_type = Annotated[action_union, Field(discriminator="tool")]
         actions_type = list[action_type]  # type: ignore[valid-type]
@@ -153,6 +173,8 @@ class InstructorAutonomousReasoningEngine:
 def available_tool_types(
     source: DataSource,
     source_state: dict[str, Any],
+    *,
+    max_wait_seconds: int | None = None,
 ) -> tuple[type[SourceToolCall], ...]:
     """Return only tool schemas permitted by current deterministic graph policy."""
     source_names = available_source_tools(source, source_state)
@@ -168,11 +190,40 @@ def available_tool_types(
     )
     if not pending_alert and not required_actions:
         core = (SendAlert,)
-    if not pending_alert and not required_actions and source_state.get("phase") == "objective":
+    if (
+        not pending_alert
+        and not required_actions
+        and source_state.get("phase") == "objective"
+    ):
         core += (SelectObjective,)
-    if not pending_alert and not required_actions and validate_wait(source_state) is None:
-        core += (Wait,)
+    if (
+        not pending_alert
+        and not required_actions
+        and validate_wait(source_state) is None
+    ):
+        core += ((_bounded_wait_type(max_wait_seconds) if max_wait_seconds else Wait),)
     return (*tools, *core)
+
+
+def _bounded_wait_type(max_wait_seconds: int) -> type[Wait]:
+    """Constrain the agent-visible wait schema to the configured runtime ceiling."""
+    return cast(
+        type[Wait],
+        create_model(
+            "Wait",
+            __base__=Wait,
+            seconds=(
+                int,
+                Field(
+                    ge=1,
+                    le=max_wait_seconds,
+                    description=(
+                        "Requested polling delay in seconds, bounded by runtime policy."
+                    ),
+                ),
+            ),
+        ),
+    )
 
 
 def _pending_send_alert_type(resource_id: str) -> type[SendAlert]:
@@ -211,7 +262,8 @@ def build_tool_catalog(
 def parse_core_tool(payload: dict[str, Any]) -> SourceToolCall | None:
     """Validate a persisted core tool payload, returning none for source tools."""
     tool_types = {
-        tool_type.model_fields["tool"].default: tool_type for tool_type in CORE_TOOL_TYPES
+        tool_type.model_fields["tool"].default: tool_type
+        for tool_type in CORE_TOOL_TYPES
     }
     tool_type = tool_types.get(payload.get("tool"))
     return tool_type.model_validate(payload) if tool_type else None

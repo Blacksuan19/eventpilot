@@ -244,7 +244,9 @@ async def test_graph_runs_github_actions_tools_without_platform_changes() -> Non
     """Execute non-Adaptyv tools through the unchanged generic autonomous graph."""
     source = GitHubActionsTestSource()
     sink = RecordingSink()
-    graph = build_autonomous_graph(ScriptedGitHubAgent(), source, sink)
+    graph = build_autonomous_graph(
+        ScriptedGitHubAgent(), source, sink, max_wait_seconds=3_600
+    )
 
     result = await AgentRuntime(graph).run(max_invocations=1)
 
@@ -262,7 +264,9 @@ async def test_graph_executes_independent_source_actions_in_parallel() -> None:
     """Fan out independent source reads and reduce their effects in selection order."""
     source = ParallelGitHubActionsTestSource()
     sink = RecordingSink()
-    graph = build_autonomous_graph(ScriptedParallelGitHubAgent(), source, sink)
+    graph = build_autonomous_graph(
+        ScriptedParallelGitHubAgent(), source, sink, max_wait_seconds=3_600
+    )
 
     result = await AgentRuntime(graph).run(max_invocations=1)
 

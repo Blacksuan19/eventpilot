@@ -282,6 +282,7 @@ async def test_quote_action_waits_for_operator_decision(
         QuoteActionAgent(),
         source,
         sink,
+        max_wait_seconds=3_600,
         sleep=immediate_sleep,
         reporter=reporter,
     )
@@ -327,6 +328,7 @@ async def test_approval_remains_claimed_until_resume_invocation_finishes() -> No
         QuoteActionAgent(),
         AdaptyvDataSource(client),
         RecordingSink(),
+        max_wait_seconds=3_600,
         sleep=immediate_sleep,
         reporter=reporter,
     )
@@ -393,6 +395,7 @@ async def test_quote_interrupt_resumes_after_runtime_restart(tmp_path: Path) -> 
             QuoteActionAgent(),
             AdaptyvDataSource(MockFoundryClient.from_fixture()),
             first_sink,
+            max_wait_seconds=3_600,
             sleep=immediate_sleep,
             reporter=first_reporter,
             checkpointer=checkpointer,
@@ -417,6 +420,7 @@ async def test_quote_interrupt_resumes_after_runtime_restart(tmp_path: Path) -> 
             WaitAfterApprovalAgent(),
             AdaptyvDataSource(second_client),
             second_sink,
+            max_wait_seconds=3_600,
             sleep=immediate_sleep,
             checkpointer=checkpointer,
         )

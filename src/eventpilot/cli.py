@@ -42,6 +42,7 @@ def _build_reasoning_engine(settings: Settings, source: DataSource) -> Autonomou
         source,
         api_key=(settings.llm_api_key.get_secret_value() if settings.llm_api_key else None),
         api_base=settings.llm_api_base,
+        max_wait_seconds=settings.max_wait_seconds,
     )
 
 
@@ -72,6 +73,7 @@ def _create_runtime(
         sleep=accelerated_clock.sleep if accelerated_clock else asyncio.sleep,
         idle_sleep=(accelerated_clock.sleep_unbounded if accelerated_clock else asyncio.sleep),
         clock=accelerated_clock or time,
+        max_wait_seconds=settings.max_wait_seconds,
         external_call_timeout_seconds=settings.external_call_timeout_seconds,
         retry_max_attempts=settings.retry_max_attempts,
         retry_initial_interval_seconds=settings.retry_initial_interval_seconds,

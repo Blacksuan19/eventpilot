@@ -240,17 +240,22 @@ LangGraph checkpointer, clear its event history, and start again. The container 
 Docker sets `EVENTPILOT_TIME_ACCELERATION=3600`. One logical second advances the mock experiment
 clock by one hour. Active waits are capped at five physical seconds so a full experiment portfolio
 can be shown in a short recording. After all experiments are reported, the idle wait runs for its
-full duration so the dashboard visibly stops polling.
+full duration so the dashboard visibly stops polling. Independently, every model-selected wait is
+bounded to one logical hour by default. This keeps source discovery alive even when the model asks
+to remain idle for much longer.
 
 These settings control that behavior.
 
 ```dotenv
 EVENTPILOT_TIME_ACCELERATION=3600
 EVENTPILOT_MAX_PHYSICAL_WAIT_SECONDS=5
+EVENTPILOT_MAX_WAIT_SECONDS=3600
 EVENTPILOT_RECURSION_LIMIT=256
 ```
 
-The acceleration factor and fixture durations remain hidden from the model.
+`EVENTPILOT_MAX_WAIT_SECONDS` is included in the model's generated `wait` tool schema and enforced
+again by the graph before it checkpoints a deadline. The acceleration factor and fixture durations
+remain hidden from the model.
 
 ## Adding integrations
 

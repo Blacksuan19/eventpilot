@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     mock_llm: bool = False
     time_acceleration: PositiveFloat = 1.0
     max_physical_wait_seconds: NonNegativeFloat = 5.0
+    max_wait_seconds: PositiveInt = Field(
+        default=3_600,
+        le=86_400,
+    )
     recursion_limit: PositiveInt = 256
     dashboard_host: str = "0.0.0.0"
     dashboard_port: PositiveInt = 8000

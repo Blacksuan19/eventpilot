@@ -66,7 +66,7 @@ class AutonomousGraphNodes:
         sleep: Sleep,
         idle_sleep: Sleep | None,
         clock: Callable[[], float],
-        max_wait_seconds: int | None,
+        max_wait_seconds: int,
         reporter: AgentReporter,
     ) -> None:
         """Bind node behavior to one graph's services and runtime policy."""
@@ -405,7 +405,7 @@ class AutonomousGraphNodes:
                 state, action, update.get("transcript", [])[-1]["result"], update
             )
             return update
-        elapsed_seconds = min(action.seconds, self.max_wait_seconds or action.seconds)
+        elapsed_seconds = min(action.seconds, self.max_wait_seconds)
         return {
             "pending_wait": {
                 "requested_seconds": action.seconds,
@@ -446,7 +446,7 @@ class AutonomousGraphNodes:
         }
         update = _tool_result(state, action, result)
         update["source_state"] = after_wait(
-            source_state, requested_seconds=requested_seconds, wake_at=wake_at
+            source_state, elapsed_seconds=elapsed_seconds, wake_at=wake_at
         )
         update["pending_wait"] = None
         unit = "second" if elapsed_seconds == 1 else "seconds"

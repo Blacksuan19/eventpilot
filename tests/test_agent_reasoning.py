@@ -52,7 +52,9 @@ async def test_instructor_reasoning_accepts_multiple_typed_actions(
             "experiment-b": {"status": "InQueue"},
         },
     }
-    engine = InstructorAutonomousReasoningEngine("openai/test-model", source)
+    engine = InstructorAutonomousReasoningEngine(
+        "openai/test-model", source, max_wait_seconds=3_600
+    )
 
     turn = await engine.decide([], source_state)
 
@@ -78,3 +80,17 @@ def test_pending_alert_schema_accepts_only_the_queue_head() -> None:
 
     assert schema["properties"]["resource_ids"]["items"]["const"] == "experiment-a"
     assert schema["properties"]["resource_ids"]["maxItems"] == 1
+
+
+def test_wait_schema_exposes_the_runtime_ceiling() -> None:
+    """Tell the model the largest delay that runtime policy will accept."""
+    source = AdaptyvDataSource(MockFoundryClient.from_fixture())
+
+    tool_types = available_tool_types(source, initial_state(), max_wait_seconds=900)
+    wait_type = next(
+        tool_type
+        for tool_type in tool_types
+        if tool_type.model_fields["tool"].default == "wait"
+    )
+
+    assert wait_type.model_json_schema()["properties"]["seconds"]["maximum"] == 900

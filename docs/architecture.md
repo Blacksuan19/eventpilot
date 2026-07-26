@@ -64,7 +64,9 @@ message. After confirmed delivery, the graph records deduplication and monitorin
 process. A normal wake records the polling state and reaches the explicit end-invocation node. If
 the process exits during the sleep, the runtime resumes LangGraph's unfinished checkpoint with
 `None` input and sleeps only for the remaining interval. Once the invocation reaches `END`, the
-runtime starts a fresh finite invocation on the same SQLite thread.
+runtime starts a fresh finite invocation on the same SQLite thread. Runtime policy bounds the
+interval to `EVENTPILOT_MAX_WAIT_SECONDS`, which defaults to one hour. The same ceiling appears in
+the generated tool schema, while the durable result retains both requested and applied durations.
 
 ## Runtime reporting
 
@@ -101,7 +103,7 @@ and accelerated tests without exposing timing metadata to the LLM.
 
 ## Responsibility split
 
-- The LLM chooses source tools, alerts, and polling cadence.
+- The LLM chooses source tools, alerts, and polling cadence within the configured wait ceiling.
 - LangGraph owns generic routing, objectives, resource state, polling, delivery policy, invocation state,
   and checkpoints.
 - Instructor validates choices against the dynamically composed tool schema.

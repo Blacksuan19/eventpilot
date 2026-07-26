@@ -209,6 +209,7 @@ async def test_reasoning_node_recovers_from_transient_failure() -> None:
         agent,
         source,
         NoopSink(),
+        max_wait_seconds=3_600,
         sleep=immediate_sleep,
         retry_max_attempts=3,
         retry_initial_interval_seconds=0,
@@ -227,6 +228,7 @@ async def test_repeatable_source_read_recovers_from_transient_failure() -> None:
         DiscoveryThenWaitAgent(),
         AdaptyvDataSource(client),
         NoopSink(),
+        max_wait_seconds=3_600,
         sleep=immediate_sleep,
         retry_max_attempts=3,
         retry_initial_interval_seconds=0,
@@ -247,6 +249,7 @@ async def test_reasoning_node_times_out() -> None:
         HangingAgent(),
         AdaptyvDataSource(MockFoundryClient.from_fixture()),
         NoopSink(),
+        max_wait_seconds=3_600,
         external_call_timeout_seconds=0.01,
         retry_max_attempts=1,
     )
@@ -262,6 +265,7 @@ async def test_non_repeatable_source_action_is_not_retried() -> None:
         MutationAgent(),
         source,
         NoopSink(),
+        max_wait_seconds=3_600,
         retry_max_attempts=3,
         retry_initial_interval_seconds=0,
     )
@@ -282,6 +286,7 @@ async def test_runtime_restart_resumes_only_the_remaining_wait() -> None:
         agent,
         source,
         NoopSink(),
+        max_wait_seconds=3_600,
         checkpointer=checkpointer,
         sleep=clock.sleep,
         clock=clock,
@@ -303,6 +308,7 @@ async def test_runtime_restart_resumes_only_the_remaining_wait() -> None:
         agent,
         source,
         NoopSink(),
+        max_wait_seconds=3_600,
         checkpointer=checkpointer,
         sleep=clock.sleep,
         clock=clock,
@@ -321,6 +327,7 @@ async def test_langgraph_recursion_limit_stops_an_unbounded_agent_loop() -> None
         RepeatingDiscoveryAgent(),
         AdaptyvDataSource(MockFoundryClient.from_fixture()),
         NoopSink(),
+        max_wait_seconds=3_600,
     )
 
     with pytest.raises(GraphRecursionError):

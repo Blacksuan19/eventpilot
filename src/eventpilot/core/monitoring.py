@@ -239,7 +239,7 @@ def validate_wait(state: dict[str, Any]) -> str | None:
     return blockers[0] if blockers else None
 
 
-def after_wait(state: dict[str, Any], *, requested_seconds: int, wake_at: float) -> dict[str, Any]:
+def after_wait(state: dict[str, Any], *, elapsed_seconds: float, wake_at: float) -> dict[str, Any]:
     """Advance graph scheduling state after the generic wait node completes."""
     updated = deepcopy(state)
     was_idle = updated.get("phase") == "idle"
@@ -255,7 +255,7 @@ def after_wait(state: dict[str, Any], *, requested_seconds: int, wake_at: float)
         if resource_id != last_inspected and resource_id not in completed
     ]
     updated["objective_waited"] = True
-    updated["poll_interval_seconds"] = requested_seconds
+    updated["poll_interval_seconds"] = elapsed_seconds
     if was_idle:
         updated["phase"] = "discovery"
     return updated
