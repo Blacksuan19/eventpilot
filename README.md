@@ -18,6 +18,7 @@ Adaptyv's published API. Fixture timing and lifecycle data stay hidden behind th
 
 - Discovers events and resources through tools supplied by the configured data source.
 - Chooses and executes observational or state-changing tools as work evolves.
+- Executes independent read tools concurrently and reduces their evidence in a stable order.
 - Interleaves concurrent objectives instead of blocking on one resource.
 - Chooses its own polling interval with a `wait` tool.
 - Uses source evidence to decide whether to act, continue investigating, or notify an operator.
@@ -39,7 +40,7 @@ behind a separate `NotificationSink` protocol. A deployment can pair any source 
 flowchart TB
     subgraph control[Agent control]
         direction LR
-        runtime[Continuous runtime] --> agent[LLM selects one typed tool]
+        runtime[Continuous runtime] --> agent[LLM selects a typed action set]
         agent --> router{Generic tool router}
     end
 
@@ -48,6 +49,10 @@ flowchart TB
 
         subgraph source_tools[Source tools]
             direction TB
+            parallel{Independent parallel-safe reads?}
+            parallel -->|Yes| fanout[LangGraph Send fan-out]
+            fanout --> source
+            parallel -->|No| approval
             approval{Approval required?}
             approval -->|Yes| approval_message[Send request through NotificationSink]
             approval_message --> checkpoint[Checkpoint pending action in SQLite]
@@ -85,7 +90,7 @@ flowchart TB
         cycle_end[Finish finite cycle] --> runtime
     end
 
-    router -->|source tool| approval
+    router -->|source actions| parallel
     router -->|send_alert| validate
     router -->|wait| mode
     router -->|finish_cycle| cycle_end
@@ -122,9 +127,10 @@ flowchart TB
     style lifecycle fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px
 ```
 
-After sending a notification, the agent continues its current cycle. It can work through other ready
-resources, call another source tool, or wait. Calling `finish_cycle` closes the current cycle, and
-the continuous runtime starts the next one.
+Independent source reads selected in the same turn run as LangGraph `Send` branches. Their normalized
+effects join before the next reasoning turn and are applied in selection order. State-changing
+tools, notifications, waits, and approval-sensitive actions remain serialized. Calling
+`finish_cycle` closes the current cycle, and the continuous runtime starts the next one.
 
 ## Notification sinks
 

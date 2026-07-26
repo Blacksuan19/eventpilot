@@ -11,7 +11,8 @@ Docker container
 └── AgentRuntime (`while True`)
     └── finite LangGraph cycle (stable SQLite supervisor thread)
         └── LLM agent ◄──► generic tool router
-            ├── data-source tool ──► configured DataSource
+            ├── parallel-safe source reads ──► Send fan-out ──► DataSource ──► reducer
+            ├── state-changing source tool ──► configured DataSource
             ├── send_alert(...) ──► configured NotificationSink ──► END
             ├── wait(seconds, reason) ──► LLM agent
             └── finish_cycle(summary) ──► END
@@ -26,6 +27,11 @@ Instructor builds its response model and agent-visible catalog directly from Pyd
 published by the adapter, source, and core. Names, arguments, constraints, and descriptions are not
 duplicated in prompts. Adding or replacing an adapter therefore changes the LLM's validated tool
 set without adding graph nodes or routing branches.
+
+Each source tool declares whether it is safe to execute concurrently. One reasoning turn may select
+multiple parallel-safe tools targeting different resources. LangGraph fans those calls out with
+`Send`, waits for the superstep, and then reduces their normalized effects in the original action
+order. Control tools, writes, approvals, and overlapping resource calls remain single-action turns.
 
 ## Data-source contract
 
@@ -66,8 +72,9 @@ immediately starts a fresh finite invocation on the same SQLite thread. It is no
 ## Runtime reporting
 
 The graph emits typed `AgentDecisionEvent`, `ToolResultEvent`, and `CycleFinishedEvent` records
-through an `AgentReporter` protocol. Decision events include the concrete Pydantic action model,
-validated arguments, rationale, currently available tools, counters, and the source-state snapshot.
+through an `AgentReporter` protocol. Decision events include every concrete Pydantic action model,
+validated arguments, whether the turn is parallel, rationale, currently available tools, counters,
+and the source-state snapshot.
 Tool events add the result, outcome, and resulting state; wait events explicitly expose requested
 and elapsed seconds.
 
