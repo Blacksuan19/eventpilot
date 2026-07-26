@@ -52,11 +52,7 @@ async def test_instructor_reasoning_accepts_multiple_typed_actions(
             "experiment-b": {"status": "InQueue"},
         },
     }
-    engine = InstructorAutonomousReasoningEngine(
-        "openai/test-model",
-        source,
-        max_tool_calls_per_cycle=6,
-    )
+    engine = InstructorAutonomousReasoningEngine("openai/test-model", source)
 
     turn = await engine.decide([], source_state)
 
@@ -65,7 +61,7 @@ async def test_instructor_reasoning_accepts_multiple_typed_actions(
         "get_experiment",
     ]
     assert client.response_schema is not None
-    assert client.response_schema["properties"]["actions"]["maxItems"] == 6
+    assert "maxItems" not in client.response_schema["properties"]["actions"]
 
 
 def test_pending_alert_schema_accepts_only_the_queue_head() -> None:
@@ -77,12 +73,7 @@ def test_pending_alert_schema_accepts_only_the_queue_head() -> None:
         "pending_alert_resource_ids": ["experiment-a", "experiment-b"],
     }
 
-    [send_alert_type] = available_tool_types(
-        source,
-        source_state,
-        tool_count=32,
-        max_tool_calls=32,
-    )
+    [send_alert_type] = available_tool_types(source, source_state)
     schema = send_alert_type.model_json_schema()
 
     assert schema["properties"]["resource_ids"]["items"]["const"] == "experiment-a"

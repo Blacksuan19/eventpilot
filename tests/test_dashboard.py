@@ -14,7 +14,7 @@ def decision_event() -> AgentDecisionEvent:
     """Build one representative agent decision for dashboard tests."""
     return AgentDecisionEvent(
         data_source="adaptyv-foundry",
-        cycle_count=2,
+        invocation_count=2,
         tool_count=3,
         rationale="Inspect the active experiment before deciding whether to wait.",
         actions=[
@@ -101,7 +101,7 @@ async def test_dashboard_serves_page_health_and_history() -> None:
     assert "Reset demo" in page.text
     assert ".activity { height:360px" in page.text
     assert "#arguments { flex:1; min-height:52px; overflow:auto" in page.text
-    assert "e.event==='cycle_finished'?'Cycle finished'" in page.text
+    assert "e.event==='invocation_finished'?'Invocation finished'" in page.text
     assert "e.event==='tool_result'&&e.tool==='send_alert'&&e.result?.message_id" in page.text
     assert health.json() == {
         "status": "ok",

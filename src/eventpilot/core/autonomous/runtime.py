@@ -1,4 +1,4 @@
-"""Continuous runtime for finite autonomous graph cycles."""
+"""Continuous runtime for persisted autonomous graph invocations."""
 
 import asyncio
 from typing import Any
@@ -18,7 +18,7 @@ class AgentRuntime:
         self,
         graph: Any,
         *,
-        recursion_limit: int = 10_000,
+        recursion_limit: int = 256,
         automatic_approval: ApprovalDecision | None = None,
     ) -> None:
         """Bind the process loop to the global autonomous-agent thread."""
@@ -32,12 +32,12 @@ class AgentRuntime:
         self._resume_lock = asyncio.Lock()
         self._submitted_approval_ids: set[str] = set()
 
-    async def run(self, *, max_cycles: int | None = None) -> AutonomousAgentState:
-        """Run cycles while preserving and resuming native LangGraph interrupts."""
+    async def run(self, *, max_invocations: int | None = None) -> AutonomousAgentState:
+        """Run bounded invocations while preserving native LangGraph interrupts."""
         completed = 0
         result: dict[str, Any] = {}
         graph_input: dict[str, Any] | Command[Any] = await self._initial_input()
-        while max_cycles is None or completed < max_cycles:
+        while max_invocations is None or completed < max_invocations:
             result = await self._graph.ainvoke(graph_input, config=self._config)
             if result.get("__interrupt__"):
                 pending = result.get("pending_approval")
@@ -47,7 +47,7 @@ class AgentRuntime:
                     self._submitted_approval_ids.discard(approval_id)
                 continue
             completed += 1
-            graph_input = {"transcript": []}
+            graph_input = {"transcript": [], "tool_count": 0}
         return AutonomousAgentState(**result)
 
     async def resolve_approval(self, approval_id: str, decision: ApprovalDecision) -> bool:
@@ -68,10 +68,10 @@ class AgentRuntime:
             return True
 
     async def _initial_input(self) -> dict[str, Any] | Command[Any]:
-        """Resume a checkpointed interrupt or start a fresh finite cycle."""
+        """Resume a checkpointed interrupt or start a fresh graph invocation."""
         pending = await self._pending_approval()
         if pending is None:
-            return {"transcript": []}
+            return {"transcript": [], "tool_count": 0}
         return await self._resume_input()
 
     async def _resume_input(self) -> Command[Any]:

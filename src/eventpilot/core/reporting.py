@@ -12,7 +12,7 @@ class AgentEvent(BaseModel):
 
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     data_source: str
-    cycle_count: int = Field(ge=0)
+    invocation_count: int = Field(ge=0)
     tool_count: int = Field(ge=0)
 
     @property
@@ -79,10 +79,10 @@ class ApprovalResolvedEvent(AgentEvent):
     arguments: dict[str, Any]
 
 
-class CycleFinishedEvent(AgentEvent):
-    """Describe why a finite graph cycle returned control to the runtime."""
+class InvocationFinishedEvent(AgentEvent):
+    """Describe why one graph invocation returned control to the runtime."""
 
-    event: Literal["cycle_finished"] = "cycle_finished"
+    event: Literal["invocation_finished"] = "invocation_finished"
     summary: str
     outcome: str
     source_state: dict[str, Any]

@@ -11,12 +11,12 @@ ObjectiveKind = Literal["monitor", "report_results", "status_digest", "investiga
 
 
 class SelectObjective(SourceToolCall):
-    """Commit a cycle to a validated portfolio and objective type."""
+    """Commit the agent to a validated portfolio and objective type."""
 
     tool: Literal["select_objective"] = "select_objective"
     kind: ObjectiveKind = Field(
         description=(
-            "Cycle intent: monitor follows all active discovered resources; report_results "
+            "Objective intent: monitor follows all active discovered resources; report_results "
             "delivers available results; status_digest summarizes multiple resources; "
             "investigate_incident examines related abnormal resources."
         )
@@ -325,7 +325,7 @@ def record_alert(
     ]
     updated.pop("pending_alert_resource_id", None)
     if not should_continue_after_alert(updated):
-        updated = record_finish(updated)
+        updated = complete_objective(updated)
     return updated
 
 
@@ -342,22 +342,8 @@ def should_continue_after_alert(state: dict[str, Any]) -> bool:
     )
 
 
-def validate_finish(state: dict[str, Any]) -> str | None:
-    """Reject completion while delivery or an idle wait remains outstanding."""
-    pending = pending_alert_resource_ids(state)
-    if pending:
-        return f"Result evidence for {pending[0]} must be reported before finishing the cycle."
-    required = required_source_actions(state)
-    if required:
-        resource_id, action = next(iter(required.items()))
-        return f"Resource {resource_id} requires {action} before finishing the cycle."
-    if state.get("phase") == "idle":
-        return "An idle source must wait before starting another discovery cycle."
-    return None
-
-
-def record_finish(state: dict[str, Any]) -> dict[str, Any]:
-    """Clear bounded objective state before the next discovery cycle."""
+def complete_objective(state: dict[str, Any]) -> dict[str, Any]:
+    """Clear completed objective state before the next discovery pass."""
     updated = deepcopy(state)
     updated.update(
         objective=None,

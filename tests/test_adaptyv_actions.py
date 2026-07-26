@@ -17,7 +17,7 @@ from eventpilot.adapters.adaptyv.tools import (
     ListExperiments,
     UpdateExperiment,
 )
-from eventpilot.core.agent_reasoning import AgentTurn, FinishCycle
+from eventpilot.core.agent_reasoning import AgentTurn, Wait
 from eventpilot.core.approvals import ApprovalDecision
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
 from eventpilot.core.monitoring import (
@@ -43,6 +43,10 @@ class StaticClock:
     def __call__(self) -> float:
         """Return the current fixture time."""
         return self.now
+
+
+async def immediate_sleep(seconds: float) -> None:
+    """Complete test waits without delaying approval scenarios."""
 
 
 class RecordingSink:
@@ -108,8 +112,8 @@ class QuoteActionAgent:
                     action=AcceptExperimentQuote(experiment_id="experiment-il6"),
                 ),
                 AgentTurn(
-                    rationale="The bounded approval scenario is complete.",
-                    action=FinishCycle(summary="Quote decision recorded."),
+                    rationale="The approval scenario is complete.",
+                    action=Wait(seconds=1, reason="Quote decision recorded."),
                 ),
             ]
         )
@@ -121,16 +125,16 @@ class QuoteActionAgent:
         return next(self._turns)
 
 
-class FinishAfterApprovalAgent:
-    """Finish a restored cycle after its suspended tool has executed."""
+class WaitAfterApprovalAgent:
+    """End a restored invocation after its suspended tool has executed."""
 
     async def decide(
         self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
     ) -> AgentTurn:
-        """Close the bounded cycle after LangGraph resumes the approved action."""
+        """Select a terminating wait after LangGraph resumes the approved action."""
         return AgentTurn(
             rationale="The restored approval scenario is complete.",
-            action=FinishCycle(summary="Restored quote approval completed."),
+            action=Wait(seconds=1, reason="Restored quote approval completed."),
         )
 
 
@@ -227,11 +231,12 @@ async def test_quote_action_waits_for_operator_decision(
         QuoteActionAgent(),
         source,
         sink,
+        sleep=immediate_sleep,
         reporter=reporter,
     )
     runtime = AgentRuntime(graph)
 
-    run = asyncio.create_task(runtime.run(max_cycles=1))
+    run = asyncio.create_task(runtime.run(max_invocations=1))
     for _ in range(100):
         requested = next(
             (event for event in reporter.events if isinstance(event, ApprovalRequestedEvent)),
@@ -275,10 +280,11 @@ async def test_quote_interrupt_resumes_after_runtime_restart(tmp_path: Path) -> 
             QuoteActionAgent(),
             AdaptyvDataSource(MockFoundryClient.from_fixture()),
             first_sink,
+            sleep=immediate_sleep,
             reporter=first_reporter,
             checkpointer=checkpointer,
         )
-        first_run = asyncio.create_task(AgentRuntime(first_graph).run(max_cycles=1))
+        first_run = asyncio.create_task(AgentRuntime(first_graph).run(max_invocations=1))
         for _ in range(100):
             snapshot = await first_graph.aget_state(config)
             if any(task.interrupts for task in snapshot.tasks):
@@ -295,9 +301,10 @@ async def test_quote_interrupt_resumes_after_runtime_restart(tmp_path: Path) -> 
     second_client = MockFoundryClient.from_fixture()
     async with AsyncSqliteSaver.from_conn_string(str(database)) as checkpointer:
         restored_graph = build_autonomous_graph(
-            FinishAfterApprovalAgent(),
+            WaitAfterApprovalAgent(),
             AdaptyvDataSource(second_client),
             second_sink,
+            sleep=immediate_sleep,
             checkpointer=checkpointer,
         )
         restored_runtime = AgentRuntime(restored_graph)
@@ -305,7 +312,7 @@ async def test_quote_interrupt_resumes_after_runtime_restart(tmp_path: Path) -> 
             str(pending["id"]), ApprovalDecision.APPROVED
         )
 
-        result = await restored_runtime.run(max_cycles=1)
+        result = await restored_runtime.run(max_invocations=1)
 
     acceptance = next(
         entry

@@ -12,8 +12,8 @@ class AutonomousAgentState(TypedDict, total=False):
     turn: dict[str, Any]
     source_state: dict[str, Any]
     outcome: str
-    cycle_summary: str | None
-    cycle_count: int
+    invocation_summary: str | None
+    invocation_count: int
     tool_count: int
     pending_approval: dict[str, Any] | None
     approval_decision: str | None
@@ -29,6 +29,5 @@ ToolRoute = Literal[
     "request_approval",
     "send_alert",
     "wait",
-    "finish_cycle",
     "reject_action",
 ]

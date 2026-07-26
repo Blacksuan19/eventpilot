@@ -9,7 +9,6 @@ from langgraph.types import Command, Overwrite, Send, interrupt
 from eventpilot.core.agent_reasoning import (
     AgentTurn,
     AutonomousReasoningEngine,
-    FinishCycle,
     SelectObjective,
     SendAlert,
     Wait,
@@ -25,12 +24,10 @@ from eventpilot.core.monitoring import (
     available_source_tools,
     initial_state,
     record_alert,
-    record_finish,
     record_rejected_action,
     select_objective,
     should_continue_after_alert,
     validate_alert,
-    validate_finish,
     validate_source_action,
     validate_source_actions,
     validate_wait,
@@ -42,7 +39,7 @@ from eventpilot.core.reporting import (
     AgentReporter,
     ApprovalRequestedEvent,
     ApprovalResolvedEvent,
-    CycleFinishedEvent,
+    InvocationFinishedEvent,
     ToolResultEvent,
 )
 from eventpilot.notifications.base import NotificationSink
@@ -70,7 +67,6 @@ class AutonomousGraphNodes:
         idle_sleep: Sleep | None,
         clock: Callable[[], float],
         max_wait_seconds: int | None,
-        max_tool_calls_per_cycle: int,
         reporter: AgentReporter,
     ) -> None:
         """Bind node behavior to one graph's services and runtime policy."""
@@ -81,7 +77,6 @@ class AutonomousGraphNodes:
         self.idle_sleep = idle_sleep
         self.clock = clock
         self.max_wait_seconds = max_wait_seconds
-        self.max_tool_calls_per_cycle = max_tool_calls_per_cycle
         self.reporter = reporter
         self.operations = DurableOperations(source, sink, clock)
 
@@ -103,7 +98,7 @@ class AutonomousGraphNodes:
         self.reporter.emit(
             AgentDecisionEvent(
                 data_source=self.source.name,
-                cycle_count=state.get("cycle_count", 0),
+                invocation_count=state.get("invocation_count", 0),
                 tool_count=state.get("tool_count", 0),
                 rationale=turn.rationale,
                 actions=[
@@ -117,12 +112,7 @@ class AutonomousGraphNodes:
                 parallel=len(turn.actions) > 1,
                 available_tools=sorted(
                     tool_type.model_fields["tool"].default
-                    for tool_type in available_tool_types(
-                        self.source,
-                        source_state,
-                        tool_count=state.get("tool_count", 0),
-                        max_tool_calls=self.max_tool_calls_per_cycle,
-                    )
+                    for tool_type in available_tool_types(self.source, source_state)
                 ),
                 source_state=source_state,
             )
@@ -145,7 +135,7 @@ class AutonomousGraphNodes:
                         },
                         "source_state": self.source_state(state),
                         "transcript": state.get("transcript", []),
-                        "cycle_count": state.get("cycle_count", 0),
+                        "invocation_count": state.get("invocation_count", 0),
                         "tool_count": state.get("tool_count", 0),
                         "parallel_action_index": index,
                     },
@@ -157,8 +147,6 @@ class AutonomousGraphNodes:
             return "send_alert"
         if isinstance(action, Wait):
             return "wait"
-        if isinstance(action, FinishCycle):
-            return "finish_cycle"
         if isinstance(action, SelectObjective):
             return "select_objective"
         source_state = self.source_state(state)
@@ -315,7 +303,7 @@ class AutonomousGraphNodes:
         self.reporter.emit(
             ApprovalRequestedEvent(
                 data_source=self.source.name,
-                cycle_count=state.get("cycle_count", 0),
+                invocation_count=state.get("invocation_count", 0),
                 tool_count=state.get("tool_count", 0),
                 approval_id=approval_id,
                 title=requirement.title,
@@ -340,7 +328,7 @@ class AutonomousGraphNodes:
         self.reporter.emit(
             ApprovalResolvedEvent(
                 data_source=self.source.name,
-                cycle_count=state.get("cycle_count", 0),
+                invocation_count=state.get("invocation_count", 0),
                 tool_count=state.get("tool_count", 0),
                 approval_id=str(pending["id"]),
                 decision=decision.value,
@@ -367,7 +355,7 @@ class AutonomousGraphNodes:
     async def send_alert(
         self, state: AutonomousAgentState, runtime: Runtime[Any]
     ) -> AutonomousAgentState:
-        """Deliver an alert and continue useful work within the current cycle."""
+        """Deliver an alert and end when the current objective is complete."""
         action = _expect_action(state, self.source, SendAlert)
         source_state = self.source_state(state)
         rejection = validate_alert(action.resource_ids, source_state)
@@ -390,14 +378,10 @@ class AutonomousGraphNodes:
         summary = f"Delivered alert for {', '.join(action.resource_ids)}."
         if not should_continue_after_alert(update["source_state"]):
             update.update(
-                cycle_summary=summary,
-                cycle_count=state.get("cycle_count", 0) + 1,
-                tool_count=0,
-                outcome="cycle_finished",
+                invocation_summary=summary,
+                outcome="invocation_ready_to_end",
             )
         self.report_tool_result(state, action, result, update)
-        if update.get("outcome") == "cycle_finished":
-            self.report_cycle_finished(update, summary)
         return update
 
     async def wait(self, state: AutonomousAgentState) -> AutonomousAgentState:
@@ -429,6 +413,12 @@ class AutonomousGraphNodes:
         update["source_state"] = after_wait(
             source_state, requested_seconds=action.seconds, wake_at=wake_at
         )
+        unit = "second" if elapsed_seconds == 1 else "seconds"
+        summary = f"Waited {elapsed_seconds:g} {unit} before the next invocation."
+        update.update(
+            invocation_summary=summary,
+            outcome="invocation_ready_to_end",
+        )
         self.report_tool_result(
             state,
             action,
@@ -439,24 +429,18 @@ class AutonomousGraphNodes:
         )
         return update
 
-    def finish_cycle(self, state: AutonomousAgentState) -> AutonomousAgentState:
-        """End one bounded invocation after graph-owned policy approves completion."""
-        action = _expect_action(state, self.source, FinishCycle)
-        rejection = validate_finish(self.source_state(state))
-        if rejection:
-            update = _rejected_tool_result(state, action, rejection)
-            self.report_tool_result(
-                state, action, update.get("transcript", [])[-1]["result"], update
-            )
-            return update
+    def end_invocation(self, state: AutonomousAgentState) -> AutonomousAgentState:
+        """Finalize a graph invocation at an explicit checkpointed topology boundary."""
+        summary = state.get("invocation_summary")
+        if summary is None:
+            raise ValueError("Ending an invocation requires a summary")
         update: AutonomousAgentState = {
-            "cycle_summary": action.summary,
-            "cycle_count": state.get("cycle_count", 0) + 1,
-            "source_state": record_finish(self.source_state(state)),
-            "tool_count": 0,
-            "outcome": "cycle_finished",
+            "invocation_count": state.get("invocation_count", 0) + 1,
+            "outcome": "invocation_finished",
         }
-        self.report_cycle_finished(update, action.summary)
+        completed = AutonomousAgentState(**state)
+        completed.update(update)
+        self.report_invocation_finished(completed, summary)
         return update
 
     def reject_action(self, state: AutonomousAgentState) -> AutonomousAgentState:
@@ -484,9 +468,9 @@ class AutonomousGraphNodes:
         }
 
     @staticmethod
-    def route_cycle_end(state: AutonomousAgentState) -> Literal["end", "agent"]:
-        """End a completed cycle or return a rejected attempt to the agent."""
-        return "end" if state.get("outcome") == "cycle_finished" else "agent"
+    def route_invocation_end(state: AutonomousAgentState) -> Literal["end", "agent"]:
+        """End completed work or return a rejected attempt to the agent."""
+        return "end" if state.get("outcome") == "invocation_ready_to_end" else "agent"
 
     def report_tool_result(
         self,
@@ -502,7 +486,9 @@ class AutonomousGraphNodes:
         self.reporter.emit(
             ToolResultEvent(
                 data_source=self.source.name,
-                cycle_count=update.get("cycle_count", previous.get("cycle_count", 0)),
+                invocation_count=update.get(
+                    "invocation_count", previous.get("invocation_count", 0)
+                ),
                 tool_count=update.get("tool_count", previous.get("tool_count", 0)),
                 tool=action.tool_name,
                 action_model=type(action).__name__,
@@ -515,15 +501,15 @@ class AutonomousGraphNodes:
             )
         )
 
-    def report_cycle_finished(self, state: AutonomousAgentState, summary: str) -> None:
-        """Emit the durable state returned at the end of a finite cycle."""
+    def report_invocation_finished(self, state: AutonomousAgentState, summary: str) -> None:
+        """Emit the durable state returned at the end of one graph invocation."""
         self.reporter.emit(
-            CycleFinishedEvent(
+            InvocationFinishedEvent(
                 data_source=self.source.name,
-                cycle_count=state.get("cycle_count", 0),
+                invocation_count=state.get("invocation_count", 0),
                 tool_count=state.get("tool_count", 0),
                 summary=summary,
-                outcome=state.get("outcome", "cycle_finished"),
+                outcome=state.get("outcome", "invocation_finished"),
                 source_state=self.source_state(state),
             )
         )

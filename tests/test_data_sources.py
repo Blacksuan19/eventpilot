@@ -246,7 +246,7 @@ async def test_graph_runs_github_actions_tools_without_platform_changes() -> Non
     sink = RecordingSink()
     graph = build_autonomous_graph(ScriptedGitHubAgent(), source, sink)
 
-    result = await AgentRuntime(graph).run(max_cycles=1)
+    result = await AgentRuntime(graph).run(max_invocations=1)
 
     assert [entry["tool"] for entry in result.get("transcript", [])] == [
         "list_workflow_runs",
@@ -264,7 +264,7 @@ async def test_graph_executes_independent_source_actions_in_parallel() -> None:
     sink = RecordingSink()
     graph = build_autonomous_graph(ScriptedParallelGitHubAgent(), source, sink)
 
-    result = await AgentRuntime(graph).run(max_cycles=1)
+    result = await AgentRuntime(graph).run(max_invocations=1)
 
     assert source.max_active == 2
     assert [entry["tool"] for entry in result.get("transcript", [])] == [

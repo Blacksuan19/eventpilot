@@ -14,7 +14,7 @@ from eventpilot.adapters.adaptyv.tools import (
     SubmitExperiment,
     UpdateExperiment,
 )
-from eventpilot.core.agent_reasoning import AgentTurn, FinishCycle, SendAlert, Wait
+from eventpilot.core.agent_reasoning import AgentTurn, SendAlert, Wait
 from eventpilot.core.monitoring import (
     SelectObjective,
     pending_alert_resource_ids,
@@ -29,14 +29,11 @@ class DemoAdaptyvReasoningEngine:
         self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
     ) -> AgentTurn:
         """Choose a representative Foundry trajectory using only observed tool results."""
-        if not transcript:
-            return self._discovery_turn()
-
         pending_alerts = pending_alert_resource_ids(source_state)
         if pending_alerts:
             experiment_id = pending_alerts[0]
-            result_count = source_state.get("evidence", {}).get(experiment_id, {}).get(
-                "result_count", 0
+            result_count = (
+                source_state.get("evidence", {}).get(experiment_id, {}).get("result_count", 0)
             )
             return AgentTurn(
                 rationale="Deliver the next inspected result waiting in the alert queue.",
@@ -51,6 +48,29 @@ class DemoAdaptyvReasoningEngine:
         if required:
             experiment_id, tool = next(iter(required.items()))
             return self._required_action_turn(experiment_id, tool, source_state)
+
+        if not transcript:
+            if source_state.get("phase") == "active" and source_state.get("objective"):
+                objective = source_state["objective"]
+                completed = set(source_state.get("completed_resource_ids", []))
+                experiment_ids = [
+                    experiment_id
+                    for experiment_id in objective.get("resource_ids", [])
+                    if experiment_id not in completed
+                ]
+                if experiment_ids:
+                    return AgentTurn(
+                        rationale="Resume the durable portfolio from persisted source state.",
+                        actions=[
+                            GetExperiment(experiment_id=experiment_id)
+                            for experiment_id in experiment_ids
+                        ],
+                    )
+                return AgentTurn(
+                    rationale="No portfolio work is immediately available.",
+                    action=Wait(seconds=60, reason="Back off before checking source state again."),
+                )
+            return self._discovery_turn()
 
         latest = transcript[-1]
         tool = latest["tool"]
@@ -83,33 +103,9 @@ class DemoAdaptyvReasoningEngine:
             return AgentTurn(
                 rationale="Inspect the independent experiments in this portfolio concurrently.",
                 actions=[
-                    GetExperiment(experiment_id=experiment_id)
-                    for experiment_id in experiment_ids
+                    GetExperiment(experiment_id=experiment_id) for experiment_id in experiment_ids
                 ],
             )
-
-        if tool == "wait":
-            if source_state.get("phase") == "discovery" and not source_state.get("objective"):
-                return AgentTurn(
-                    rationale="The idle backoff completed without new work.",
-                    action=FinishCycle(summary="No actionable experiments after idle backoff."),
-                )
-            objective = source_state.get("objective") or {}
-            completed = set(source_state.get("completed_resource_ids", []))
-            experiment_ids = [
-                experiment_id
-                for experiment_id in objective.get("resource_ids", [])
-                if experiment_id not in completed
-            ]
-            if experiment_ids:
-                return AgentTurn(
-                    rationale="The polling interval elapsed; refresh the portfolio concurrently.",
-                    actions=[
-                        GetExperiment(experiment_id=experiment_id)
-                        for experiment_id in experiment_ids
-                    ],
-                )
-            return self._discovery_turn()
 
         if tool == "get_experiment":
             objective = source_state.get("objective") or {}
@@ -211,14 +207,14 @@ class DemoAdaptyvReasoningEngine:
                 )
             return AgentTurn(
                 rationale="No other portfolio result is immediately reportable.",
-                action=FinishCycle(summary="Reported all currently ready results."),
+                action=Wait(seconds=1, reason="Pause before refreshing the active portfolio."),
             )
 
         return self._discovery_turn()
 
     @staticmethod
     def _discovery_turn() -> AgentTurn:
-        """Return the first Foundry discovery action for a fresh cycle."""
+        """Return the Foundry discovery action for a new invocation."""
         return AgentTurn(
             rationale="Discover current experiments before selecting an objective.",
             action=ListExperiments(),
@@ -226,7 +222,7 @@ class DemoAdaptyvReasoningEngine:
 
     @staticmethod
     def _last_focused_experiment_id(transcript: list[dict[str, Any]]) -> str | None:
-        """Return the experiment most recently inspected in this cycle."""
+        """Return the experiment most recently inspected in this invocation."""
         for entry in reversed(transcript):
             if entry["tool"] == "get_experiment":
                 return str(entry["result"]["id"])

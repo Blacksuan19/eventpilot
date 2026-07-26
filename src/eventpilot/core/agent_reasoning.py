@@ -14,7 +14,6 @@ from eventpilot.core.monitoring import (
     available_source_tools,
     pending_alert_resource_ids,
     required_source_actions,
-    validate_finish,
     validate_wait,
 )
 from eventpilot.core.notifications import NotificationPriority
@@ -45,18 +44,10 @@ class Wait(SourceToolCall):
     reason: str = Field(min_length=1, description="Why current work requires a pause.")
 
 
-class FinishCycle(SourceToolCall):
-    """Complete current work and return control to the fresh-cycle runtime."""
-
-    tool: Literal["finish_cycle"] = "finish_cycle"
-    summary: str = Field(min_length=1, description="Completed work or yield reason.")
-
-
 CORE_TOOL_TYPES: tuple[type[SourceToolCall], ...] = (
     SelectObjective,
     SendAlert,
     Wait,
-    FinishCycle,
 )
 
 
@@ -103,7 +94,6 @@ class InstructorAutonomousReasoningEngine:
         *,
         api_key: str | None = None,
         api_base: str | None = None,
-        max_tool_calls_per_cycle: int = 32,
     ) -> None:
         """Create a structured client and dynamic response schema for one source plugin."""
         options: dict[str, Any] = {}
@@ -116,34 +106,19 @@ class InstructorAutonomousReasoningEngine:
             instructor.from_provider(model, async_client=True, **options),
         )
         self._source = source
-        self._max_tool_calls_per_cycle = max_tool_calls_per_cycle
 
     async def decide(
         self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
     ) -> AgentTurn:
         """Ask the LLM to select one control action or independent source actions."""
-        finish_rejection = validate_finish(source_state)
-        if len(transcript) >= self._max_tool_calls_per_cycle and finish_rejection is None:
-            return AgentTurn(
-                rationale="The cycle reached its tool budget and must yield to a fresh cycle.",
-                actions=[FinishCycle(
-                    summary="Cycle tool budget reached; resume from fresh source evidence."
-                )],
-            )
-        available_types = available_tool_types(
-            self._source,
-            source_state,
-            tool_count=len(transcript),
-            max_tool_calls=self._max_tool_calls_per_cycle,
-        )
+        available_types = available_tool_types(self._source, source_state)
         action_union = reduce(or_, available_types)
         action_type = Annotated[action_union, Field(discriminator="tool")]
-        remaining_tool_calls = max(1, self._max_tool_calls_per_cycle - len(transcript))
         actions_type = list[action_type]  # type: ignore[valid-type]
         response_model = create_model(
             f"{self._source.name.title().replace('-', '')}AvailableAgentTurn",
             rationale=(str, Field(min_length=1)),
-            actions=(actions_type, Field(min_length=1, max_length=remaining_tool_calls)),
+            actions=(actions_type, Field(min_length=1)),
         )
         response: Any = await self._client.create(
             response_model=response_model,
@@ -164,7 +139,6 @@ class InstructorAutonomousReasoningEngine:
                                 for tool_type in available_types
                             ),
                             "tool_catalog": build_tool_catalog(available_types),
-                            "remaining_tool_calls": remaining_tool_calls,
                             "source_state": source_state,
                             "tool_transcript": transcript,
                         }
@@ -179,9 +153,6 @@ class InstructorAutonomousReasoningEngine:
 def available_tool_types(
     source: DataSource,
     source_state: dict[str, Any],
-    *,
-    tool_count: int,
-    max_tool_calls: int,
 ) -> tuple[type[SourceToolCall], ...]:
     """Return only tool schemas permitted by current deterministic graph policy."""
     source_names = available_source_tools(source, source_state)
@@ -201,8 +172,6 @@ def available_tool_types(
         core += (SelectObjective,)
     if not pending_alert and not required_actions and validate_wait(source_state) is None:
         core += (Wait,)
-    if not pending_alert and not required_actions and validate_finish(source_state) is None:
-        core += (FinishCycle,)
     return (*tools, *core)
 
 

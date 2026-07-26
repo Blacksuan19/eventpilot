@@ -21,7 +21,6 @@ from eventpilot.adapters.adaptyv.tools import (
 )
 from eventpilot.core.agent_reasoning import (
     AgentTurn,
-    FinishCycle,
     SendAlert,
     Wait,
 )
@@ -79,6 +78,7 @@ class ScriptedAgent:
     def __init__(self, turns: list[AgentTurn]) -> None:
         """Store the turns in the order the graph should request them."""
         self._turns = iter(turns)
+        self.calls = 0
 
     async def decide(
         self,
@@ -86,6 +86,7 @@ class ScriptedAgent:
         source_state: dict[str, Any],
     ) -> AgentTurn:
         """Return the next scripted turn without interpreting tool results."""
+        self.calls += 1
         return next(self._turns)
 
 
@@ -165,7 +166,7 @@ def fuzz_lifecycle(randomizer: random.Random) -> list[LifecycleStep]:
     ]
 
 
-async def test_agent_discovers_polls_results_and_finishes_cycle() -> None:
+async def test_agent_discovers_polls_results_across_persisted_invocations() -> None:
     """Prove the LLM control loop chooses the complete autonomous tool trajectory."""
     foundry, clock = timed_foundry(
         [
@@ -185,11 +186,10 @@ async def test_agent_discovers_polls_results_and_finishes_cycle() -> None:
         reporter=reporter,
     )
 
-    result = await AgentRuntime(graph).run(max_cycles=1)
+    result = await AgentRuntime(graph).run(max_invocations=3)
 
-    transcript = result.get("transcript")
-    assert transcript is not None
-    assert tool_names(transcript) == [
+    tool_events = [event.tool for event in reporter.events if isinstance(event, ToolResultEvent)]
+    assert tool_events == [
         "list_experiments",
         "select_objective",
         "get_experiment",
@@ -200,8 +200,8 @@ async def test_agent_discovers_polls_results_and_finishes_cycle() -> None:
         "list_experiment_results",
         "send_alert",
     ]
-    assert result.get("outcome") == "cycle_finished"
-    assert result.get("cycle_count") == 1
+    assert result.get("outcome") == "invocation_finished"
+    assert result.get("invocation_count") == 3
     assert len(sink.notifications) == 1
     assert "results are ready" in sink.notifications[0].title
     assert clock.waits == [1, 1]
@@ -220,42 +220,10 @@ async def test_agent_discovers_polls_results_and_finishes_cycle() -> None:
     assert first_decision.actions[0].action_model == "ListExperiments"
     assert first_decision.actions[0].arguments == {"limit": 50, "offset": 0}
     assert first_decision.available_tools == [
-        "finish_cycle",
         "list_experiments",
         "send_alert",
         "wait",
     ]
-
-
-async def test_budget_yield_can_finish_after_discovery() -> None:
-    """Allow a bounded cycle to yield after discovery before choosing an objective."""
-    foundry, clock = timed_foundry([scenario_with_lifecycle([ExperimentStatus.IN_QUEUE])])
-    agent = ScriptedAgent(
-        [
-            AgentTurn(
-                rationale="Discover current experiments.",
-                action=ListExperiments(),
-            ),
-            AgentTurn(
-                rationale="Yield after reaching this cycle's budget.",
-                action=FinishCycle(summary="Resume from discovery in a fresh cycle."),
-            ),
-        ]
-    )
-    graph = build_autonomous_graph(
-        agent,
-        AdaptyvDataSource(foundry),
-        RecordingSink(),
-        sleep=clock.sleep,
-        clock=clock,
-        max_tool_calls_per_cycle=1,
-    )
-
-    result = await AgentRuntime(graph).run(max_cycles=1)
-
-    assert result.get("outcome") == "cycle_finished"
-    assert result.get("cycle_summary") == "Resume from discovery in a fresh cycle."
-    assert tool_names(result.get("transcript", [])) == ["list_experiments"]
 
 
 async def test_agent_investigates_updates_while_completed_results_are_delayed() -> None:
@@ -264,19 +232,20 @@ async def test_agent_investigates_updates_while_completed_results_are_delayed() 
         [scenario_with_lifecycle([ExperimentStatus.DONE], done_delay_seconds=1)]
     )
     sink = RecordingSink()
+    reporter = RecordingReporter()
     graph = build_autonomous_graph(
         DemoAdaptyvReasoningEngine(),
         AdaptyvDataSource(foundry),
         sink,
         sleep=clock.sleep,
         clock=clock,
+        reporter=reporter,
     )
 
-    result = await AgentRuntime(graph).run(max_cycles=1)
+    await AgentRuntime(graph).run(max_invocations=2)
 
-    transcript = result.get("transcript")
-    assert transcript is not None
-    assert tool_names(transcript) == [
+    tool_events = [event.tool for event in reporter.events if isinstance(event, ToolResultEvent)]
+    assert tool_events == [
         "list_experiments",
         "select_objective",
         "get_experiment",
@@ -319,12 +288,11 @@ async def test_fixture_time_advances_only_with_the_hidden_clock() -> None:
 
 
 async def test_idle_agent_waits_without_sending_an_update() -> None:
-    """Cover a discovery cycle that finds no actionable work and backs off cleanly."""
+    """End an idle invocation after the agent-selected backoff completes."""
     agent = ScriptedAgent(
         [
             AgentTurn(rationale="Discover work.", action=ListExperiments()),
             AgentTurn(rationale="No work is active.", action=Wait(seconds=60, reason="Idle.")),
-            AgentTurn(rationale="Yield after the idle check.", action=FinishCycle(summary="Idle.")),
         ]
     )
     sink = RecordingSink()
@@ -349,7 +317,7 @@ async def test_idle_agent_waits_without_sending_an_update() -> None:
     )
 
     assert tool_names(result.get("transcript", [])) == ["list_experiments", "wait"]
-    assert result.get("cycle_summary") == "Idle."
+    assert result.get("invocation_summary") == "Waited 60 seconds before the next invocation."
     assert sink.notifications == []
     assert clock.waits == [60]
 
@@ -380,8 +348,8 @@ async def test_agent_selects_the_discovered_experiment_portfolio() -> None:
     assert turn.action.resource_ids == ["complete", "active"]
 
 
-async def test_supervisor_completes_two_experiments_then_starts_a_fresh_cycle() -> None:
-    """Process a portfolio concurrently, then prove the next cycle observes durable completion."""
+async def test_supervisor_completes_two_experiments_across_invocations() -> None:
+    """Process a portfolio concurrently while preserving state across waits."""
     scenarios = [
         scenario_with_lifecycle(
             [ExperimentStatus.IN_QUEUE, ExperimentStatus.DONE], fixture_index=0
@@ -401,7 +369,7 @@ async def test_supervisor_completes_two_experiments_then_starts_a_fresh_cycle() 
         clock=clock,
     )
 
-    result = await AgentRuntime(graph).run(max_cycles=2)
+    result = await AgentRuntime(graph).run(max_invocations=2)
 
     assert foundry.inspected_ids == [
         experiment_ids[0],
@@ -413,11 +381,11 @@ async def test_supervisor_completes_two_experiments_then_starts_a_fresh_cycle() 
         f"Experiment {experiment_ids[0]} results are ready",
         f"Experiment {experiment_ids[1]} results are ready",
     ]
-    assert result.get("cycle_count") == 2
+    assert result.get("invocation_count") == 2
     assert result.get("source_state", {}).get("completed_resource_ids") == experiment_ids
 
 
-async def test_result_delivery_is_idempotent_across_fresh_cycles() -> None:
+async def test_result_delivery_is_idempotent_across_fresh_invocations() -> None:
     """Prove durable completion state suppresses a repeated result notification."""
     scenario = scenario_with_lifecycle([ExperimentStatus.DONE])
     experiment_id = scenario.experiment.id
@@ -445,7 +413,6 @@ async def test_result_delivery_is_idempotent_across_fresh_cycles() -> None:
             ),
             AgentTurn(rationale="Discover again.", action=ListExperiments()),
             AgentTurn(rationale="Nothing remains.", action=Wait(seconds=1, reason="Idle.")),
-            AgentTurn(rationale="Finish idle cycle.", action=FinishCycle(summary="Checked.")),
         ]
     )
     sink = RecordingSink()
@@ -458,7 +425,7 @@ async def test_result_delivery_is_idempotent_across_fresh_cycles() -> None:
         clock=clock,
     )
 
-    result = await AgentRuntime(graph).run(max_cycles=2)
+    result = await AgentRuntime(graph).run(max_invocations=2)
 
     assert len(sink.notifications) == 1
     assert result.get("source_state", {}).get("completed_resource_ids") == [experiment_id]
@@ -523,7 +490,7 @@ async def test_result_alerts_cannot_group_experiments() -> None:
         agent, AdaptyvDataSource(foundry), sink, sleep=clock.sleep, clock=clock
     )
 
-    result = await AgentRuntime(graph).run(max_cycles=1)
+    result = await AgentRuntime(graph).run(max_invocations=1)
 
     grouped = result.get("transcript", [])[4]
     assert grouped["result"]["status"] == "rejected"
@@ -532,7 +499,7 @@ async def test_result_alerts_cannot_group_experiments() -> None:
     assert result.get("source_state", {}).get("completed_resource_ids") == experiment_ids
 
 
-async def test_ready_result_blocks_wait_and_finish_until_reported() -> None:
+async def test_ready_result_blocks_wait_until_reported() -> None:
     """Make an inspected result an immediate single-resource reporting obligation."""
     scenario = scenario_with_lifecycle([ExperimentStatus.DONE])
     experiment_id = scenario.experiment.id
@@ -554,10 +521,6 @@ async def test_ready_result_blocks_wait_and_finish_until_reported() -> None:
             ),
             AgentTurn(rationale="Incorrectly delay.", action=Wait(seconds=10, reason="Later.")),
             AgentTurn(
-                rationale="Incorrectly finish.",
-                action=FinishCycle(summary="Leave the result pending."),
-            ),
-            AgentTurn(
                 rationale="Report immediately.",
                 action=SendAlert(
                     resource_ids=[experiment_id],
@@ -573,12 +536,11 @@ async def test_ready_result_blocks_wait_and_finish_until_reported() -> None:
         agent, AdaptyvDataSource(foundry), sink, sleep=clock.sleep, clock=clock
     )
 
-    result = await AgentRuntime(graph).run(max_cycles=1)
+    result = await AgentRuntime(graph).run(max_invocations=1)
 
     transcript = result.get("transcript", [])
     assert transcript[4]["result"]["status"] == "rejected"
     assert "reported before waiting" in transcript[4]["result"]["reason"]
-    assert transcript[5]["result"]["status"] == "rejected"
     assert clock.waits == []
     assert len(sink.notifications) == 1
 
@@ -645,7 +607,7 @@ async def test_graph_requires_a_complete_monitoring_portfolio() -> None:
         agent, AdaptyvDataSource(foundry), sink, sleep=clock.sleep, clock=clock
     )
 
-    result = await AgentRuntime(graph).run(max_cycles=1)
+    result = await AgentRuntime(graph).run(max_invocations=1)
 
     rejected = result.get("transcript", [])[1]
     assert rejected["result"]["status"] == "rejected"
@@ -712,7 +674,7 @@ async def test_graph_accepts_multi_experiment_monitor_objective() -> None:
         agent, AdaptyvDataSource(foundry), sink, sleep=clock.sleep, clock=clock
     )
 
-    result = await AgentRuntime(graph).run(max_cycles=1)
+    result = await AgentRuntime(graph).run(max_invocations=1)
 
     objective = result.get("transcript", [])[1]
     assert objective["result"]["resource_ids"] == experiment_ids
@@ -775,9 +737,6 @@ async def test_active_monitor_requires_agent_selected_wait_before_reporting() ->
                 rationale="Nothing is eligible yet.",
                 action=Wait(seconds=30, reason="Wait until the next eligible poll."),
             ),
-            AgentTurn(
-                rationale="End the idle cycle.", action=FinishCycle(summary="No eligible work.")
-            ),
         ]
     )
     sink = RecordingSink()
@@ -786,7 +745,7 @@ async def test_active_monitor_requires_agent_selected_wait_before_reporting() ->
         agent, AdaptyvDataSource(foundry), sink, sleep=clock.sleep, clock=clock
     )
 
-    result = await AgentRuntime(graph).run(max_cycles=2)
+    result = await AgentRuntime(graph).run(max_invocations=3)
 
     monitoring = result.get("source_state", {}).get("monitoring", {})[experiment_id]
     assert monitoring == {
@@ -803,44 +762,7 @@ async def test_active_monitor_requires_agent_selected_wait_before_reporting() ->
     assert len(sink.notifications) == 1
 
 
-async def test_monitor_can_yield_when_graph_tool_budget_is_exhausted() -> None:
-    """Prove a forced cycle yield cannot loop forever behind the monitor invariant."""
-    scenario = scenario_with_lifecycle([ExperimentStatus.IN_QUEUE, ExperimentStatus.DONE])
-    experiment_id = scenario.experiment.id
-    agent = ScriptedAgent(
-        [
-            AgentTurn(rationale="Discover.", action=ListExperiments()),
-            AgentTurn(
-                rationale="Monitor one experiment.",
-                action=SelectObjective(
-                    kind="monitor",
-                    resource_ids=[experiment_id],
-                    summary="Monitor queue progress.",
-                ),
-            ),
-            AgentTurn(
-                rationale="The cycle budget is exhausted.",
-                action=FinishCycle(summary="Resume monitoring in a fresh cycle."),
-            ),
-        ]
-    )
-    foundry, clock = timed_foundry([scenario])
-    graph = build_autonomous_graph(
-        agent,
-        AdaptyvDataSource(foundry),
-        RecordingSink(),
-        sleep=clock.sleep,
-        clock=clock,
-        max_tool_calls_per_cycle=2,
-    )
-
-    result = await AgentRuntime(graph).run(max_cycles=1)
-
-    assert result.get("outcome") == "cycle_finished"
-    assert result.get("cycle_summary") == "Resume monitoring in a fresh cycle."
-
-
-async def test_sqlite_checkpoint_survives_fresh_cycles(tmp_path: Path) -> None:
+async def test_sqlite_checkpoint_survives_fresh_invocations(tmp_path: Path) -> None:
     """Prove fresh invocations retain durable counters while clearing working context."""
     sink = RecordingSink()
     database = tmp_path / "checkpoints.sqlite"
@@ -861,7 +783,7 @@ async def test_sqlite_checkpoint_survives_fresh_cycles(tmp_path: Path) -> None:
             sleep=first_clock.sleep,
             clock=first_clock,
         )
-        first = await AgentRuntime(graph).run(max_cycles=1)
+        first = await AgentRuntime(graph).run(max_invocations=2)
         restarted_foundry, restarted_clock = timed_foundry(
             [
                 first_scenario.model_copy(
@@ -882,11 +804,11 @@ async def test_sqlite_checkpoint_survives_fresh_cycles(tmp_path: Path) -> None:
             sleep=restarted_clock.sleep,
             clock=restarted_clock,
         )
-        second = await AgentRuntime(restarted_graph).run(max_cycles=1)
+        second = await AgentRuntime(restarted_graph).run(max_invocations=2)
 
-    assert first.get("cycle_count") == 1
-    assert second.get("cycle_count") == 2
-    assert len(second.get("transcript", [])) == 7
+    assert first.get("invocation_count") == 2
+    assert second.get("invocation_count") == 4
+    assert len(second.get("transcript", [])) == 3
     second_source_state = second.get("source_state", {})
     assert second_source_state.get("completed_resource_ids") == experiment_ids
     assert set(second_source_state.get("monitoring", {})) == set(experiment_ids)
@@ -914,7 +836,7 @@ async def test_agent_handles_fuzzed_experiment_collections(seed: int) -> None:
     )
 
     result = await AgentRuntime(graph, automatic_approval=ApprovalDecision.APPROVED).run(
-        max_cycles=len(fuzzed)
+        max_invocations=32
     )
 
     completed_ids = result.get("source_state", {}).get("completed_resource_ids", [])

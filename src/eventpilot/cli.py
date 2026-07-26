@@ -31,9 +31,7 @@ from eventpilot.sources.adaptyv_demo import DemoAdaptyvReasoningEngine
 from eventpilot.sources.base import DataSource
 
 
-def _build_reasoning_engine(
-    settings: Settings, source: DataSource, *, max_tool_calls_per_cycle: int = 32
-) -> AutonomousReasoningEngine:
+def _build_reasoning_engine(settings: Settings, source: DataSource) -> AutonomousReasoningEngine:
     """Create either the configured LLM agent or the explicit offline test double."""
     if settings.mock_llm:
         return DemoAdaptyvReasoningEngine()
@@ -44,7 +42,6 @@ def _build_reasoning_engine(
         source,
         api_key=(settings.llm_api_key.get_secret_value() if settings.llm_api_key else None),
         api_base=settings.llm_api_base,
-        max_tool_calls_per_cycle=max_tool_calls_per_cycle,
     )
 
 
@@ -55,7 +52,6 @@ def _create_runtime(
     reporter: AgentReporter | None = None,
 ) -> AgentRuntime:
     """Build one graph runtime around shared durable checkpoint infrastructure."""
-    max_tool_calls_per_cycle = 32
     accelerated_clock = (
         AcceleratedClock(
             settings.time_acceleration,
@@ -66,9 +62,7 @@ def _create_runtime(
     )
     foundry = MockFoundryClient.from_fixture(clock=accelerated_clock or monotonic)
     source = AdaptyvDataSource(foundry)
-    agent = _build_reasoning_engine(
-        settings, source, max_tool_calls_per_cycle=max_tool_calls_per_cycle
-    )
+    agent = _build_reasoning_engine(settings, source)
     graph = build_autonomous_graph(
         agent,
         source,
@@ -78,13 +72,12 @@ def _create_runtime(
         sleep=accelerated_clock.sleep if accelerated_clock else asyncio.sleep,
         idle_sleep=(accelerated_clock.sleep_unbounded if accelerated_clock else asyncio.sleep),
         clock=accelerated_clock or time,
-        max_tool_calls_per_cycle=max_tool_calls_per_cycle,
         external_call_timeout_seconds=settings.external_call_timeout_seconds,
         retry_max_attempts=settings.retry_max_attempts,
         retry_initial_interval_seconds=settings.retry_initial_interval_seconds,
         reporter=reporter,
     )
-    return AgentRuntime(graph)
+    return AgentRuntime(graph, recursion_limit=settings.recursion_limit)
 
 
 async def run_dashboard() -> None:

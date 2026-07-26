@@ -4,19 +4,23 @@ import asyncio
 from typing import Any, Literal
 
 import pytest
-from langgraph.errors import NodeTimeoutError
+from langgraph.errors import GraphRecursionError, NodeTimeoutError
 
 from eventpilot.adapters.adaptyv.mock import MockFoundryClient
 from eventpilot.adapters.adaptyv.models import ExperimentPage
 from eventpilot.adapters.adaptyv.tools import ListExperiments
-from eventpilot.core.agent_reasoning import AgentTurn, FinishCycle
+from eventpilot.core.agent_reasoning import AgentTurn, Wait
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
 from eventpilot.core.notifications import DeliveryResult, Notification
 from eventpilot.sources.adaptyv import AdaptyvDataSource
 from eventpilot.sources.base import SourceContext, SourceExecution, SourceToolCall
 
 
-class FlakyFinishAgent:
+async def immediate_sleep(seconds: float) -> None:
+    """Complete test waits without delaying the suite."""
+
+
+class FlakyWaitAgent:
     """Fail one model request before returning a valid terminal decision."""
 
     def __init__(self) -> None:
@@ -26,13 +30,13 @@ class FlakyFinishAgent:
     async def decide(
         self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
     ) -> AgentTurn:
-        """Raise a transient connection error once, then finish the cycle."""
+        """Raise a transient connection error once, then select a terminating wait."""
         self.attempts += 1
         if self.attempts == 1:
             raise ConnectionError("temporary model connection failure")
         return AgentTurn(
             rationale="The transient model failure recovered.",
-            action=FinishCycle(summary="Recovered model call."),
+            action=Wait(seconds=1, reason="Recovered model call."),
         )
 
 
@@ -47,8 +51,8 @@ class HangingAgent:
         raise AssertionError("The timeout should cancel this call")
 
 
-class DiscoveryThenFinishAgent:
-    """Discover source resources and then end the current cycle."""
+class DiscoveryThenWaitAgent:
+    """Discover source resources and then end the invocation after a wait."""
 
     def __init__(self) -> None:
         """Create the fixed two-turn trajectory."""
@@ -57,7 +61,7 @@ class DiscoveryThenFinishAgent:
                 AgentTurn(rationale="Discover resources.", action=ListExperiments()),
                 AgentTurn(
                     rationale="Discovery recovered and completed.",
-                    action=FinishCycle(summary="Recovered source call."),
+                    action=Wait(seconds=1, reason="Recovered source call."),
                 ),
             ]
         )
@@ -142,39 +146,54 @@ class MutationAgent:
         )
 
 
+class RepeatingDiscoveryAgent:
+    """Keep selecting the same tool to exercise LangGraph's loop safeguard."""
+
+    async def decide(
+        self, transcript: list[dict[str, Any]], source_state: dict[str, Any]
+    ) -> AgentTurn:
+        """Select discovery even after graph policy makes it unavailable."""
+        return AgentTurn(rationale="Repeat discovery indefinitely.", action=ListExperiments())
+
+
 async def test_reasoning_node_recovers_from_transient_failure() -> None:
     """Retry a transient model connection failure through LangGraph policy."""
-    agent = FlakyFinishAgent()
+    agent = FlakyWaitAgent()
     source = AdaptyvDataSource(MockFoundryClient.from_fixture())
     graph = build_autonomous_graph(
         agent,
         source,
         NoopSink(),
+        sleep=immediate_sleep,
         retry_max_attempts=3,
         retry_initial_interval_seconds=0,
     )
 
-    result = await AgentRuntime(graph).run(max_cycles=1)
+    result = await AgentRuntime(graph).run(max_invocations=1)
 
     assert agent.attempts == 2
-    assert result.get("cycle_summary") == "Recovered model call."
+    assert result.get("invocation_summary") == "Waited 1 second before the next invocation."
 
 
 async def test_repeatable_source_read_recovers_from_transient_failure() -> None:
     """Retry a source tool only after its schema declares repeat execution safe."""
     client = FlakyListFoundryClient.from_fixture()
     graph = build_autonomous_graph(
-        DiscoveryThenFinishAgent(),
+        DiscoveryThenWaitAgent(),
         AdaptyvDataSource(client),
         NoopSink(),
+        sleep=immediate_sleep,
         retry_max_attempts=3,
         retry_initial_interval_seconds=0,
     )
 
-    result = await AgentRuntime(graph).run(max_cycles=1)
+    result = await AgentRuntime(graph).run(max_invocations=1)
 
     assert client.list_attempts == 2
-    assert [entry["tool"] for entry in result.get("transcript", [])] == ["list_experiments"]
+    assert [entry["tool"] for entry in result.get("transcript", [])] == [
+        "list_experiments",
+        "wait",
+    ]
 
 
 async def test_reasoning_node_times_out() -> None:
@@ -188,7 +207,7 @@ async def test_reasoning_node_times_out() -> None:
     )
 
     with pytest.raises(NodeTimeoutError, match="Node 'agent' exceeded its run timeout"):
-        await AgentRuntime(graph).run(max_cycles=1)
+        await AgentRuntime(graph).run(max_invocations=1)
 
 
 async def test_non_repeatable_source_action_is_not_retried() -> None:
@@ -203,6 +222,18 @@ async def test_non_repeatable_source_action_is_not_retried() -> None:
     )
 
     with pytest.raises(ConnectionError, match="mutation outcome is unknown"):
-        await AgentRuntime(graph).run(max_cycles=1)
+        await AgentRuntime(graph).run(max_invocations=1)
 
     assert source.attempts == 1
+
+
+async def test_langgraph_recursion_limit_stops_an_unbounded_agent_loop() -> None:
+    """Use LangGraph's invocation guard instead of a resettable tool-call quota."""
+    graph = build_autonomous_graph(
+        RepeatingDiscoveryAgent(),
+        AdaptyvDataSource(MockFoundryClient.from_fixture()),
+        NoopSink(),
+    )
+
+    with pytest.raises(GraphRecursionError):
+        await AgentRuntime(graph, recursion_limit=4).run(max_invocations=1)

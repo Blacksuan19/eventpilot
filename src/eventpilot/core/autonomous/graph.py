@@ -29,7 +29,6 @@ def build_autonomous_graph(
     idle_sleep: Sleep | None = None,
     clock: Callable[[], float] = time,
     max_wait_seconds: int | None = None,
-    max_tool_calls_per_cycle: int = 32,
     external_call_timeout_seconds: float = 60.0,
     retry_max_attempts: int = 3,
     retry_initial_interval_seconds: float = 0.5,
@@ -45,7 +44,6 @@ def build_autonomous_graph(
         idle_sleep=idle_sleep,
         clock=clock,
         max_wait_seconds=max_wait_seconds,
-        max_tool_calls_per_cycle=max_tool_calls_per_cycle,
         reporter=reporter or ConsoleAgentReporter(),
     )
 
@@ -92,7 +90,7 @@ def build_autonomous_graph(
         timeout=external_call_timeout_seconds,
     )
     builder.add_node("wait", nodes.wait)
-    builder.add_node("finish_cycle", nodes.finish_cycle)
+    builder.add_node("end_invocation", nodes.end_invocation)
     builder.add_node("reject_action", nodes.reject_action)
 
     builder.add_edge(START, "agent")
@@ -106,7 +104,6 @@ def build_autonomous_graph(
             "request_approval": "request_approval",
             "send_alert": "send_alert",
             "wait": "wait",
-            "finish_cycle": "finish_cycle",
             "reject_action": "reject_action",
         },
     )
@@ -117,16 +114,16 @@ def build_autonomous_graph(
     builder.add_edge("reduce_parallel_source_tools", "agent")
     builder.add_edge("select_objective", "agent")
     builder.add_edge("reject_approval", "agent")
-    builder.add_edge("wait", "agent")
+    builder.add_conditional_edges(
+        "wait",
+        nodes.route_invocation_end,
+        {"end": "end_invocation", "agent": "agent"},
+    )
     builder.add_edge("reject_action", "agent")
     builder.add_conditional_edges(
         "send_alert",
-        nodes.route_cycle_end,
-        {"end": END, "agent": "agent"},
+        nodes.route_invocation_end,
+        {"end": "end_invocation", "agent": "agent"},
     )
-    builder.add_conditional_edges(
-        "finish_cycle",
-        nodes.route_cycle_end,
-        {"end": END, "agent": "agent"},
-    )
+    builder.add_edge("end_invocation", END)
     return builder.compile(checkpointer=checkpointer or InMemorySaver())
