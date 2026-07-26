@@ -9,7 +9,7 @@ import pytest
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from eventpilot.adapters.adaptyv.mock import MockFoundryClient, load_scenarios
-from eventpilot.adapters.adaptyv.models import ModifyExperimentRequest
+from eventpilot.adapters.adaptyv.models import ModifyExperimentRequest, QuoteConfirmation
 from eventpilot.adapters.adaptyv.tools import (
     AcceptExperimentQuote,
     GetExperiment,
@@ -43,6 +43,24 @@ class StaticClock:
     def __call__(self) -> float:
         """Return the current fixture time."""
         return self.now
+
+
+class BlockingQuoteClient(MockFoundryClient):
+    """Hold quote acceptance open so duplicate approval submissions can be tested."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Create synchronization events around the real mock mutation."""
+        super().__init__(*args, **kwargs)
+        self.accept_started = asyncio.Event()
+        self.release_accept = asyncio.Event()
+        self.accept_attempts = 0
+
+    async def accept_experiment_quote(self, experiment_id: str) -> QuoteConfirmation:
+        """Block one accepted approval while the resumed graph invocation is active."""
+        self.accept_attempts += 1
+        self.accept_started.set()
+        await self.release_accept.wait()
+        return await super().accept_experiment_quote(experiment_id)
 
 
 async def immediate_sleep(seconds: float) -> None:
@@ -266,6 +284,43 @@ async def test_quote_action_waits_for_operator_decision(
         assert (await client.get_experiment("experiment-il6")).status == "WaitingForMaterials"
     else:
         assert (await client.get_experiment("experiment-il6")).status == "QuoteSent"
+
+
+async def test_approval_remains_claimed_until_resume_invocation_finishes() -> None:
+    """Reject a duplicate decision while its approved source mutation is still running."""
+    client = BlockingQuoteClient.from_fixture()
+    reporter = RecordingReporter()
+    graph = build_autonomous_graph(
+        QuoteActionAgent(),
+        AdaptyvDataSource(client),
+        RecordingSink(),
+        sleep=immediate_sleep,
+        reporter=reporter,
+    )
+    runtime = AgentRuntime(graph)
+    run = asyncio.create_task(runtime.run(max_invocations=1))
+
+    for _ in range(100):
+        requested = next(
+            (event for event in reporter.events if isinstance(event, ApprovalRequestedEvent)),
+            None,
+        )
+        if requested is not None:
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("The graph did not request quote approval")
+
+    assert await runtime.resolve_approval(requested.approval_id, ApprovalDecision.APPROVED)
+    await asyncio.wait_for(client.accept_started.wait(), timeout=1)
+    duplicate_accepted = await runtime.resolve_approval(
+        requested.approval_id, ApprovalDecision.APPROVED
+    )
+    client.release_accept.set()
+    await asyncio.wait_for(run, timeout=1)
+
+    assert duplicate_accepted is False
+    assert client.accept_attempts == 1
 
 
 async def test_quote_interrupt_resumes_after_runtime_restart(tmp_path: Path) -> None:

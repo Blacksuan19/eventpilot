@@ -1,5 +1,6 @@
 """Exercise autonomous trajectories against fuzzed Foundry API fixtures."""
 
+import asyncio
 import random
 from pathlib import Path
 from typing import Any
@@ -26,10 +27,16 @@ from eventpilot.core.agent_reasoning import (
 )
 from eventpilot.core.approvals import ApprovalDecision
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
+from eventpilot.core.autonomous.state import AutonomousAgentState
 from eventpilot.core.clock import AcceleratedClock
 from eventpilot.core.monitoring import SelectObjective, initial_state
 from eventpilot.core.notifications import DeliveryResult, Notification
-from eventpilot.core.reporting import AgentDecisionEvent, AgentEvent, ToolResultEvent
+from eventpilot.core.reporting import (
+    AgentDecisionEvent,
+    AgentEvent,
+    ApprovalRequestedEvent,
+    ToolResultEvent,
+)
 from eventpilot.sources.adaptyv import AdaptyvDataSource
 from eventpilot.sources.adaptyv_demo import DemoAdaptyvReasoningEngine
 
@@ -70,6 +77,25 @@ class RecordingReporter:
     def emit(self, event: AgentEvent) -> None:
         """Append one immutable runtime event."""
         self.events.append(event)
+
+
+async def run_with_approved_interrupts(
+    runtime: AgentRuntime,
+    reporter: RecordingReporter,
+    *,
+    max_invocations: int,
+) -> AutonomousAgentState:
+    """Resolve test approvals through the runtime's public human-intervention API."""
+    run = asyncio.create_task(runtime.run(max_invocations=max_invocations))
+    resolved: set[str] = set()
+    while not run.done():
+        for event in reporter.events:
+            if not isinstance(event, ApprovalRequestedEvent) or event.approval_id in resolved:
+                continue
+            if await runtime.resolve_approval(event.approval_id, ApprovalDecision.APPROVED):
+                resolved.add(event.approval_id)
+        await asyncio.sleep(0)
+    return await run
 
 
 class ScriptedAgent:
@@ -826,6 +852,7 @@ async def test_agent_handles_fuzzed_experiment_collections(seed: int) -> None:
     ]
     expected_ids = [scenario.experiment.id for scenario in fuzzed]
     sink = RecordingSink()
+    reporter = RecordingReporter()
     foundry, clock = timed_foundry(fuzzed)
     graph = build_autonomous_graph(
         DemoAdaptyvReasoningEngine(),
@@ -833,10 +860,11 @@ async def test_agent_handles_fuzzed_experiment_collections(seed: int) -> None:
         sink,
         sleep=clock.sleep,
         clock=clock,
+        reporter=reporter,
     )
 
-    result = await AgentRuntime(graph, automatic_approval=ApprovalDecision.APPROVED).run(
-        max_invocations=32
+    result = await run_with_approved_interrupts(
+        AgentRuntime(graph), reporter, max_invocations=32
     )
 
     completed_ids = result.get("source_state", {}).get("completed_resource_ids", [])
