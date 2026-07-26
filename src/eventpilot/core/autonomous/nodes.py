@@ -162,6 +162,8 @@ class AutonomousGraphNodes:
                 and self.source.approval_request(action, source_state) is not None
             ):
                 return "request_approval"
+            if action.retry_safe:
+                return "retryable_source_tool"
             return "source_tool"
         return "reject_action"
 
@@ -224,9 +226,7 @@ class AutonomousGraphNodes:
             ]
         }
 
-    def reduce_parallel_source_tools(
-        self, state: AutonomousAgentState
-    ) -> AutonomousAgentState:
+    def reduce_parallel_source_tools(self, state: AutonomousAgentState) -> AutonomousAgentState:
         """Apply concurrent read results to durable state in original selection order."""
         working = AutonomousAgentState(**state)
         for item in sorted(state.get("parallel_results", []), key=lambda result: result["index"]):
@@ -254,6 +254,7 @@ class AutonomousGraphNodes:
             "outcome": "parallel_source_tools_completed",
             "parallel_results": cast(Any, Overwrite([])),
         }
+
     def choose_objective(self, state: AutonomousAgentState) -> AutonomousAgentState:
         """Validate and persist a generic monitoring objective in graph state."""
         action = _expect_action(state, self.source, SelectObjective)

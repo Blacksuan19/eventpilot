@@ -23,6 +23,7 @@ class SourceToolCall(BaseModel):
 
     availability: ClassVar[ToolAvailability | None] = None
     parallel_safe: ClassVar[bool] = False
+    retry_safe: ClassVar[bool] = False
 
     @property
     def tool_name(self) -> str:

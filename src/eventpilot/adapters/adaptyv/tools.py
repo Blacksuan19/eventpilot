@@ -11,6 +11,7 @@ from eventpilot.sources.base import SourceToolCall, ToolAvailability
 class ListExperiments(SourceToolCall):
     """List experiments visible to the authenticated Foundry organization."""
 
+    retry_safe = True
     tool: Literal["list_experiments"] = "list_experiments"
     limit: int = Field(default=50, ge=1, le=100, description="Maximum records to return.")
     offset: int = Field(default=0, ge=0, description="Zero-based pagination offset.")
@@ -20,6 +21,7 @@ class GetExperiment(SourceToolCall):
     """Retrieve the current detailed representation of one Foundry experiment."""
 
     parallel_safe = True
+    retry_safe = True
     tool: Literal["get_experiment"] = "get_experiment"
     experiment_id: str = Field(min_length=1, description="Foundry experiment identifier.")
 
@@ -28,6 +30,7 @@ class ListExperimentUpdates(SourceToolCall):
     """List chronological progress updates for one Foundry experiment."""
 
     parallel_safe = True
+    retry_safe = True
     tool: Literal["list_experiment_updates"] = "list_experiment_updates"
     experiment_id: str = Field(min_length=1, description="Foundry experiment identifier.")
 
@@ -36,6 +39,7 @@ class ListExperimentResults(SourceToolCall):
     """List analysis results currently available for one Foundry experiment."""
 
     parallel_safe = True
+    retry_safe = True
     tool: Literal["list_experiment_results"] = "list_experiment_results"
     experiment_id: str = Field(min_length=1, description="Foundry experiment identifier.")
 
@@ -75,6 +79,7 @@ class GetExperimentQuote(SourceToolCall):
     """Retrieve price and expiry details for a Foundry experiment quote."""
 
     parallel_safe = True
+    retry_safe = True
     tool: Literal["get_experiment_quote"] = "get_experiment_quote"
     availability = ToolAvailability(statuses=("QuoteSent",), evidence_keys=("detail_observed",))
     experiment_id: str = Field(min_length=1, description="Quoted experiment identifier.")

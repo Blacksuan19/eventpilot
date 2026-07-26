@@ -24,6 +24,7 @@ class AutonomousAgentState(TypedDict, total=False):
 Sleep = Callable[[float], Awaitable[None]]
 ToolRoute = Literal[
     "source_tool",
+    "retryable_source_tool",
     "select_objective",
     "request_approval",
     "send_alert",

@@ -79,6 +79,9 @@ def _create_runtime(
         idle_sleep=(accelerated_clock.sleep_unbounded if accelerated_clock else asyncio.sleep),
         clock=accelerated_clock or time,
         max_tool_calls_per_cycle=max_tool_calls_per_cycle,
+        external_call_timeout_seconds=settings.external_call_timeout_seconds,
+        retry_max_attempts=settings.retry_max_attempts,
+        retry_initial_interval_seconds=settings.retry_initial_interval_seconds,
         reporter=reporter,
     )
     return AgentRuntime(graph)

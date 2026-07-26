@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     max_physical_wait_seconds: NonNegativeFloat = 5.0
     dashboard_host: str = "0.0.0.0"
     dashboard_port: PositiveInt = 8000
+    external_call_timeout_seconds: PositiveFloat = 60.0
+    retry_max_attempts: PositiveInt = 3
+    retry_initial_interval_seconds: NonNegativeFloat = 0.5
     llm_provider: str | None = Field(default=None, validation_alias="LLM_PROVIDER")
     llm_model: str | None = Field(default=None, validation_alias="LLM_MODEL")
     llm_api_key: SecretStr | None = Field(default=None, validation_alias="LLM_API_KEY")
