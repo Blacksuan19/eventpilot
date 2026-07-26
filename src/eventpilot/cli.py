@@ -1,4 +1,4 @@
-"""Run EventPilot as a bounded demonstration or continuous supervisor."""
+"""Run the EventPilot dashboard and autonomous supervisor."""
 
 import argparse
 import asyncio
@@ -54,11 +54,10 @@ def _create_runtime(
     settings: Settings,
     checkpointer: AsyncSqliteSaver,
     *,
-    max_cycles: int | None = None,
     reporter: AgentReporter | None = None,
 ) -> AgentRuntime:
     """Build one graph runtime around shared durable checkpoint infrastructure."""
-    max_tool_calls_per_cycle = 12 if max_cycles is not None else 32
+    max_tool_calls_per_cycle = 32
     accelerated_clock = (
         AcceleratedClock(
             settings.time_acceleration,
@@ -81,28 +80,10 @@ def _create_runtime(
         sleep=accelerated_clock.sleep if accelerated_clock else asyncio.sleep,
         idle_sleep=(accelerated_clock.sleep_unbounded if accelerated_clock else asyncio.sleep),
         clock=accelerated_clock or time,
-        max_wait_seconds=(2 if max_cycles is not None and not accelerated_clock else None),
         max_tool_calls_per_cycle=max_tool_calls_per_cycle,
         reporter=reporter,
     )
-    return AgentRuntime(
-        graph,
-        automatic_approval=(ApprovalDecision.APPROVED if max_cycles is not None else None),
-    )
-
-
-async def run_agent(
-    *, max_cycles: int | None = None, reporter: AgentReporter | None = None
-) -> None:
-    """Run the autonomous supervisor continuously or for a bounded local demonstration."""
-    settings = get_settings()
-    settings.database_path.parent.mkdir(parents=True, exist_ok=True)
-    async with AsyncSqliteSaver.from_conn_string(str(settings.database_path)) as checkpointer:
-        runtime = _create_runtime(settings, checkpointer, max_cycles=max_cycles, reporter=reporter)
-        print("EventPilot autonomous supervisor started")
-        final = await runtime.run(max_cycles=max_cycles)
-        if max_cycles is not None:
-            print(f"Cycle complete: {final.get('cycle_summary')}")
+    return AgentRuntime(graph)
 
 
 async def run_dashboard() -> None:
@@ -163,11 +144,8 @@ async def run_dashboard() -> None:
 
 
 def main() -> None:
-    """Parse the command line and start the autonomous EventPilot runtime."""
-    parser = argparse.ArgumentParser(description="EventPilot autonomous experiment agent")
-    parser.add_argument("command", choices=["run", "demo", "dashboard"])
-    args = parser.parse_args()
-    if args.command == "dashboard":
-        asyncio.run(run_dashboard())
-    else:
-        asyncio.run(run_agent(max_cycles=1 if args.command == "demo" else None))
+    """Start the dashboard and its autonomous EventPilot supervisor."""
+    parser = argparse.ArgumentParser(description="EventPilot autonomous operations agent")
+    parser.add_argument("command", choices=["dashboard"])
+    parser.parse_args()
+    asyncio.run(run_dashboard())

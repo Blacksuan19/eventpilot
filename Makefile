@@ -1,4 +1,4 @@
-.PHONY: check dashboard demo run
+.PHONY: check dashboard
 
 check:
 	uv lock --check
@@ -7,12 +7,6 @@ check:
 	uv run pyright
 	uv run pytest --cov=eventpilot --cov-report=term-missing
 	uv build
-
-demo:
-	uv run eventpilot demo
-
-run:
-	uv run eventpilot run
 
 dashboard:
 	uv run eventpilot dashboard
