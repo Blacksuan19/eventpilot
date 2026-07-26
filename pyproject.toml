@@ -3,7 +3,7 @@ name = "eventpilot"
 version = "0.1.0"
 description = "A generic autonomous event-operations agent powered by LangGraph"
 readme = "README.md"
-authors = [{ name = "blacksuan19", email = "abubakaryagob@gmail.com" }]
+authors = [{ name = "blacksuan19", email = "py@aolabs.dev" }]
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.140.0",
