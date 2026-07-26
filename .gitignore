@@ -14,5 +14,6 @@ wheels/
 .eventpilot/
 .pytest_cache/
 .ruff_cache/
+.playwright-cli/
 .coverage
 htmlcov/
