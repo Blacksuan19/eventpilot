@@ -36,72 +36,51 @@ behind a separate `NotificationSink` protocol. A deployment can pair any source 
 ## Agent loop
 
 ```mermaid
-%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","lineColor":"#64748b","primaryTextColor":"#172033"},"flowchart":{"curve":"basis","nodeSpacing":34,"rankSpacing":46}}}%%
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","lineColor":"#64748b","primaryTextColor":"#172033"},"flowchart":{"curve":"linear","nodeSpacing":42,"rankSpacing":52}}}%%
 flowchart TB
-    subgraph control[Agent control]
+    subgraph control["1 · Decide"]
         direction LR
-        runtime[Continuous runtime] --> agent[LLM selects a typed action set]
-        agent --> router{Generic tool router}
+        runtime["Continuous runtime<br/>starts a finite cycle"] --> agent["LLM selects<br/>typed actions"]
+        agent --> router{"Action type"}
     end
 
-    subgraph tools[Tool execution]
+    subgraph tools["2 · Execute"]
         direction LR
-
-        subgraph source_tools[Source tools]
-            direction TB
-            parallel{Independent parallel-safe reads?}
-            parallel -->|Yes| fanout[LangGraph Send fan-out]
-            fanout --> source
-            parallel -->|No| approval
-            approval{Approval required?}
-            approval -->|Yes| approval_message[Send request through NotificationSink]
-            approval_message --> checkpoint[Checkpoint pending action in SQLite]
-            checkpoint --> paused[LangGraph interrupt]
-            paused --> operator{Operator decision}
-            operator -->|Command: approve| source
-            operator -->|Command: reject| rejected
-            approval -->|No| source
-            source[DataSource adapter] --> api[Platform API or API-shaped mock]
-            api --> effects[Normalize resource effects]
-            effects --> outcome[LangGraph reducer persists monitoring state]
-        end
-
-        subgraph notify[Notify]
-            direction TB
-            validate{Evidence and scope valid?}
-            validate -->|No| rejected[Record rejected action]
-            validate -->|Yes| sink[NotificationSink]
-            sink --> channel[Telegram, SMS, email, Slack, or another provider]
-            channel --> delivered[Record delivery and deduplicate resource]
-            delivered --> ready{Another resource ready?}
-        end
-
-        subgraph timing[Pause]
-            direction TB
-            mode{Source idle?}
-            mode -->|No| active_wait[Wait until the next check]
-            mode -->|Yes| idle_wait[Enter a long idle wait]
-        end
+        source_action["Source tools<br/>fan out independent reads"]
+        notify_action["send_alert<br/>validate evidence and scope"]
+        wait_action["wait<br/>polling interval or idle pause"]
+        finish_action["finish_cycle"]
     end
 
-    subgraph lifecycle[Lifecycle]
+    subgraph integrations["3 · Use pluggable integrations"]
         direction LR
-        next_turn[Continue current cycle]
-        cycle_end[Finish finite cycle] --> runtime
+        source["DataSource"] --> api["Platform API<br/>or API-shaped mock"]
+        sink["NotificationSink"] --> channel["Email · SMS · Slack · Telegram"]
+        approval["LangGraph interrupt"] --> operator["Operator decision"]
     end
 
-    router -->|source actions| parallel
-    router -->|send_alert| validate
-    router -->|wait| mode
-    router -->|finish_cycle| cycle_end
+    subgraph state["4 · Persist and continue"]
+        direction LR
+        effects["Normalize effects"] --> checkpoint["Reduce state and<br/>checkpoint in SQLite"]
+        checkpoint --> next_turn["Next reasoning turn"]
+    end
 
-    outcome --> next_turn
-    rejected --> next_turn
-    ready -->|Yes| next_turn
-    ready -->|No| cycle_end
-    active_wait --> next_turn
-    idle_wait --> next_turn
+    router -->|source tools| source_action
+    router -->|notification| notify_action
+    router -->|pause| wait_action
+    router -->|cycle complete| finish_action
+
+    source_action --> source
+    api --> effects
+    notify_action --> sink
+    channel --> effects
+    wait_action --> effects
+
+    source_action -.->|approval-sensitive tool| approval
+    operator -.->|Command resumes graph| source_action
+
     next_turn --> agent
+    finish_action --> runtime
 
     classDef controlNode fill:#ede9fe,stroke:#7c3aed,color:#3b1d72,stroke-width:1.5px;
     classDef decisionNode fill:#fff7d6,stroke:#d99516,color:#704b05,stroke-width:1.5px;
@@ -109,28 +88,26 @@ flowchart TB
     classDef stateNode fill:#e8f8ef,stroke:#24945a,color:#155b38,stroke-width:1.5px;
     classDef actionNode fill:#fff0e7,stroke:#db6b34,color:#783617,stroke-width:1.5px;
     classDef lifecycleNode fill:#f1f5f9,stroke:#64748b,color:#334155,stroke-width:1.5px;
-    classDef dangerNode fill:#fff0f2,stroke:#d9475f,color:#831b2d,stroke-width:1.5px;
+    classDef approvalNode fill:#fff0f2,stroke:#d9475f,color:#831b2d,stroke-width:1.5px;
 
     class runtime,agent controlNode;
-    class router,approval,operator,validate,ready,mode decisionNode;
-    class source,api,approval_message,sink,channel integrationNode;
-    class checkpoint,paused,effects,outcome,delivered stateNode;
-    class active_wait,idle_wait actionNode;
-    class next_turn,cycle_end lifecycleNode;
-    class rejected dangerNode;
+    class router decisionNode;
+    class source,api,sink,channel integrationNode;
+    class effects,checkpoint stateNode;
+    class source_action,notify_action,wait_action actionNode;
+    class finish_action,next_turn lifecycleNode;
+    class approval,operator approvalNode;
 
     style control fill:#faf8ff,stroke:#c4b5fd,stroke-width:1px
     style tools fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px
-    style source_tools fill:#f5f9ff,stroke:#bfdbfe,stroke-width:1px
-    style notify fill:#fffdf5,stroke:#fde68a,stroke-width:1px
-    style timing fill:#fff9f5,stroke:#fed7aa,stroke-width:1px
-    style lifecycle fill:#f8fafc,stroke:#cbd5e1,stroke-width:1px
+    style integrations fill:#f5f9ff,stroke:#bfdbfe,stroke-width:1px
+    style state fill:#f4fbf7,stroke:#bbf7d0,stroke-width:1px
 ```
 
-Independent source reads selected in the same turn run as LangGraph `Send` branches. Their normalized
-effects join before the next reasoning turn and are applied in selection order. State-changing
-tools, notifications, waits, and approval-sensitive actions remain serialized. Calling
-`finish_cycle` closes the current cycle, and the continuous runtime starts the next one.
+Every completed tool path joins at one reducer before the next reasoning turn. Independent source
+reads run as LangGraph `Send` branches and join in selection order. Approval-sensitive tools suspend
+at `interrupt()` and resume from the same checkpoint with `Command`. `finish_cycle` closes the
+finite cycle, then the continuous runtime starts a fresh one.
 
 ## Notification sinks
 
@@ -223,6 +200,13 @@ rationale, typed arguments, experiment states, wait countdowns, delivered messag
 approvals, and the complete tool timeline. Approval controls submit a LangGraph resume command for
 the suspended tool call. Dashboard events and LangGraph checkpoints persist in the Docker volume.
 
+To start the same dashboard directly with uv:
+
+```bash
+uv sync
+uv run eventpilot dashboard
+```
+
 Use **Reset demo** in the header to cancel the current run, delete the supervisor thread through the
 LangGraph checkpointer, clear its event history, and start again. The container stays running.
 
@@ -241,21 +225,6 @@ EVENTPILOT_MAX_PHYSICAL_WAIT_SECONDS=5
 ```
 
 The model does not see the acceleration factor or fixture durations.
-
-## Other entry points
-
-Run the continuous agent without the browser UI:
-
-```bash
-uv sync
-uv run eventpilot run
-```
-
-Run one bounded cycle with the deterministic, credential-free reasoning engine:
-
-```bash
-EVENTPILOT_MOCK_LLM=true uv run eventpilot demo
-```
 
 ## Adding integrations
 
