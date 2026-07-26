@@ -2,7 +2,6 @@
 
 import argparse
 import asyncio
-from contextlib import suppress
 from time import monotonic, time
 
 import uvicorn
@@ -14,10 +13,8 @@ from eventpilot.core.agent_reasoning import (
     AutonomousReasoningEngine,
     InstructorAutonomousReasoningEngine,
 )
-from eventpilot.core.approvals import ApprovalDecision
 from eventpilot.core.autonomous import (
     AgentRuntime,
-    AutonomousAgentState,
     build_autonomous_graph,
 )
 from eventpilot.core.clock import AcceleratedClock
@@ -27,6 +24,7 @@ from eventpilot.core.reporting import (
     ConsoleAgentReporter,
 )
 from eventpilot.dashboard.app import DashboardEventStore, create_dashboard_app
+from eventpilot.dashboard.supervisor import AgentTaskSupervisor
 from eventpilot.notifications.console import ConsoleNotificationSink
 from eventpilot.sources.adaptyv import AdaptyvDataSource
 from eventpilot.sources.adaptyv_demo import DemoAdaptyvReasoningEngine
@@ -91,56 +89,37 @@ async def run_dashboard() -> None:
     settings = get_settings()
     store = DashboardEventStore(path=settings.database_path.with_suffix(".events.jsonl"))
     reporter = CompositeAgentReporter(ConsoleAgentReporter(), store)
-    reset_lock = asyncio.Lock()
-    agent_task: asyncio.Task[AutonomousAgentState] | None = None
-    runtime: AgentRuntime | None = None
-
-    def start_agent(checkpointer: AsyncSqliteSaver) -> asyncio.Task[AutonomousAgentState]:
-        """Start one supervisor task using the shared dashboard reporter."""
-        nonlocal runtime
-        runtime = _create_runtime(settings, checkpointer, reporter=reporter)
-        return asyncio.create_task(runtime.run(), name="eventpilot-agent")
-
-    async def reset_agent(checkpointer: AsyncSqliteSaver) -> None:
-        """Cancel the supervisor, clear durable state, and start a fresh run."""
-        nonlocal agent_task, runtime
-        async with reset_lock:
-            if agent_task and not agent_task.done():
-                agent_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await agent_task
-            await checkpointer.adelete_thread(AgentRuntime.thread_id)
-            store.clear()
-            agent_task = start_agent(checkpointer)
-
-    async def resolve_approval(approval_id: str, decision: ApprovalDecision) -> bool:
-        """Resume the current graph interrupt through the active runtime."""
-        return runtime is not None and await runtime.resolve_approval(approval_id, decision)
 
     settings.database_path.parent.mkdir(parents=True, exist_ok=True)
     async with AsyncSqliteSaver.from_conn_string(str(settings.database_path)) as checkpointer:
+
+        async def reset_state() -> None:
+            """Clear graph checkpoints and dashboard events before a fresh task starts."""
+            await checkpointer.adelete_thread(AgentRuntime.thread_id)
+            store.clear()
+
+        supervisor = AgentTaskSupervisor(
+            lambda: _create_runtime(settings, checkpointer, reporter=reporter),
+            reset_state,
+        )
         server = uvicorn.Server(
             uvicorn.Config(
                 create_dashboard_app(
                     store,
-                    reset_agent=lambda: reset_agent(checkpointer),
-                    resolve_approval=resolve_approval,
+                    reset_agent=supervisor.reset,
+                    resolve_approval=supervisor.resolve_approval,
+                    get_agent_health=supervisor.health,
                 ),
                 host=settings.dashboard_host,
                 port=settings.dashboard_port,
                 log_level="warning",
             )
         )
-        agent_task = start_agent(checkpointer)
+        supervisor.start()
         try:
             await server.serve()
-            if not agent_task.done():
-                agent_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await agent_task
         finally:
-            if not agent_task.done():
-                agent_task.cancel()
+            await supervisor.stop()
 
 
 def main() -> None:

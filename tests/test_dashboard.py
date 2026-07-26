@@ -7,6 +7,7 @@ from httpx import ASGITransport, AsyncClient
 from eventpilot.core.approvals import ApprovalDecision
 from eventpilot.core.reporting import AgentActionSelection, AgentDecisionEvent
 from eventpilot.dashboard.app import DashboardEventStore, create_dashboard_app
+from eventpilot.dashboard.supervisor import AgentHealth
 
 
 def decision_event() -> AgentDecisionEvent:
@@ -80,6 +81,7 @@ async def test_dashboard_serves_page_health_and_history() -> None:
                 store,
                 reset_agent=reset_agent,
                 resolve_approval=resolve_approval,
+                get_agent_health=lambda: AgentHealth("running"),
             )
         ),
         base_url="http://test",
@@ -101,7 +103,10 @@ async def test_dashboard_serves_page_health_and_history() -> None:
     assert "#arguments { flex:1; min-height:52px; overflow:auto" in page.text
     assert "e.event==='cycle_finished'?'Cycle finished'" in page.text
     assert "e.event==='tool_result'&&e.tool==='send_alert'&&e.result?.message_id" in page.text
-    assert health.json() == {"status": "ok"}
+    assert health.json() == {
+        "status": "ok",
+        "agent": {"state": "running", "detail": None},
+    }
     assert history.json()["events"][0]["actions"][0]["tool"] == "get_experiment"
     assert reset.json() == {"status": "reset"}
     assert reset_calls == 1
@@ -111,3 +116,23 @@ async def test_dashboard_serves_page_health_and_history() -> None:
         ("approval-1", ApprovalDecision.APPROVED),
         ("missing", ApprovalDecision.REJECTED),
     ]
+
+
+async def test_dashboard_health_reports_agent_failure() -> None:
+    """Return degraded health with the supervised task failure detail."""
+    app = create_dashboard_app(
+        DashboardEventStore(),
+        get_agent_health=lambda: AgentHealth("failed", "RuntimeError: model unavailable"),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/health")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "degraded",
+        "agent": {
+            "state": "failed",
+            "detail": "RuntimeError: model unavailable",
+        },
+    }

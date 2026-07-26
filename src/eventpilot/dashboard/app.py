@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from eventpilot.core.approvals import ApprovalDecision
 from eventpilot.core.reporting import AgentEvent
+from eventpilot.dashboard.supervisor import AgentHealth
 
 
 class DashboardEventStore:
@@ -62,6 +63,7 @@ class DashboardEventStore:
 
 ResetAgent = Callable[[], Awaitable[None]]
 ResolveApproval = Callable[[str, ApprovalDecision], Awaitable[bool]]
+GetAgentHealth = Callable[[], AgentHealth]
 
 
 class ApprovalResponse(BaseModel):
@@ -75,6 +77,7 @@ def create_dashboard_app(
     *,
     reset_agent: ResetAgent | None = None,
     resolve_approval: ResolveApproval | None = None,
+    get_agent_health: GetAgentHealth | None = None,
 ) -> FastAPI:
     """Create the HTTP and server-sent-event interface for one event store."""
     app = FastAPI(title="EventPilot Live", docs_url=None, redoc_url=None)
@@ -90,9 +93,17 @@ def create_dashboard_app(
         return {"events": store.snapshot()}
 
     @app.get("/api/health")
-    async def health() -> dict[str, str]:
-        """Report dashboard readiness for Docker and browser checks."""
-        return {"status": "ok"}
+    async def health() -> JSONResponse:
+        """Report both HTTP readiness and the supervised agent lifecycle."""
+        agent = get_agent_health() if get_agent_health else AgentHealth("stopped")
+        healthy = agent.state in {"starting", "running"}
+        return JSONResponse(
+            {
+                "status": "ok" if healthy else "degraded",
+                "agent": {"state": agent.state, "detail": agent.detail},
+            },
+            status_code=200 if healthy else 503,
+        )
 
     @app.post("/api/reset")
     async def reset() -> dict[str, str]:
