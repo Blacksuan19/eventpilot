@@ -37,9 +37,9 @@ class ResourceSnapshot:
 
     resource_id: str
     status: str
-    results_status: str | None = None
     active: bool = True
-    result_ready: bool = False
+    alert_ready: bool = False
+    evidence: Mapping[str, Any] = field(default_factory=dict)
     payload: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -52,7 +52,7 @@ class SourceEffect:
     resource_id: str | None = None
     evidence: Mapping[str, Any] = field(default_factory=dict)
     inspected: bool = False
-    result_ready: bool = False
+    alert_ready: bool = False
     wait_blocker: str | None = None
     clear_wait_blocker: bool = False
     required_action: str | None = None
@@ -94,7 +94,7 @@ def parse_source_execution(payload: Mapping[str, Any]) -> SourceExecution:
             resource_id=effect["resource_id"],
             evidence=effect["evidence"],
             inspected=effect["inspected"],
-            result_ready=effect["result_ready"],
+            alert_ready=effect["alert_ready"],
             wait_blocker=effect["wait_blocker"],
             clear_wait_blocker=effect["clear_wait_blocker"],
             required_action=effect["required_action"],

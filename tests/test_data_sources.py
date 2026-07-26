@@ -16,6 +16,8 @@ from eventpilot.sources.base import (
     SourceEffect,
     SourceExecution,
     SourceToolCall,
+    parse_source_execution,
+    serialize_source_execution,
 )
 
 
@@ -78,7 +80,7 @@ class GitHubActionsTestSource:
                         resource_id=action.run_id,
                         evidence={"status": "failure", "failed_job": "tests"},
                         inspected=True,
-                        result_ready=True,
+                        alert_ready=True,
                     ),
                 ),
             )
@@ -301,3 +303,28 @@ def test_data_source_publishes_structured_tool_descriptions() -> None:
     assert list_schema["properties"]["limit"]["maximum"] == 100
     detail_schema = next(schema for schema in catalog if schema["title"] == "GetExperiment")
     assert detail_schema["x-parallel-safe"] is True
+
+
+def test_source_effect_round_trip_preserves_generic_evidence() -> None:
+    """Serialize arbitrary platform evidence without result-shaped contract fields."""
+    execution = SourceExecution(
+        result={"runs": [{"id": "4815", "conclusion": "failure"}]},
+        effects=(
+            SourceEffect(
+                "discovery",
+                resources=(
+                    ResourceSnapshot(
+                        resource_id="4815",
+                        status="failure",
+                        alert_ready=True,
+                        evidence={"failed_job": "tests", "attempt": 2},
+                        payload={"id": "4815", "conclusion": "failure"},
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    restored = parse_source_execution(serialize_source_execution(execution))
+
+    assert restored == execution

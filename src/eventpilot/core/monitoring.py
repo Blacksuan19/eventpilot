@@ -7,7 +7,7 @@ from pydantic import Field
 
 from eventpilot.sources.base import DataSource, SourceEffect, SourceExecution, SourceToolCall
 
-ObjectiveKind = Literal["monitor", "report_results", "status_digest", "investigate_incident"]
+ObjectiveKind = Literal["monitor", "notify", "status_digest", "investigate_incident"]
 
 
 class SelectObjective(SourceToolCall):
@@ -16,8 +16,8 @@ class SelectObjective(SourceToolCall):
     tool: Literal["select_objective"] = "select_objective"
     kind: ObjectiveKind = Field(
         description=(
-            "Objective intent: monitor follows all active discovered resources; report_results "
-            "delivers available results; status_digest summarizes multiple resources; "
+            "Objective intent: monitor follows all active discovered resources; notify delivers "
+            "source-signaled alerts; status_digest summarizes multiple resources; "
             "investigate_incident examines related abnormal resources."
         )
     )
@@ -218,7 +218,7 @@ def record_rejected_action(action: SourceToolCall, state: dict[str, Any]) -> dic
 
 
 def pending_alert_resource_ids(state: dict[str, Any]) -> list[str]:
-    """Return queued result alerts while accepting the legacy singular checkpoint field."""
+    """Return queued source alerts while accepting the legacy singular checkpoint field."""
     pending = state.get("pending_alert_resource_ids")
     if isinstance(pending, list):
         return [str(resource_id) for resource_id in pending]
@@ -230,7 +230,7 @@ def validate_wait(state: dict[str, Any]) -> str | None:
     """Prevent waiting while normalized evidence requires immediate work."""
     pending = pending_alert_resource_ids(state)
     if pending:
-        return f"Result evidence for {pending[0]} must be reported before waiting."
+        return f"Alert-ready evidence for {pending[0]} must be delivered before waiting."
     blockers = [
         str(evidence["wait_blocker"])
         for evidence in state.get("evidence", {}).values()
@@ -271,13 +271,13 @@ def validate_alert(resource_ids: list[str], state: dict[str, Any]) -> str | None
         return "Resource is outside objective scope."
     evidence = state.get("evidence", {})
     ready = {
-        resource_id: bool(evidence.get(resource_id, {}).get("result_ready"))
+        resource_id: bool(evidence.get(resource_id, {}).get("alert_ready"))
         for resource_id in resource_ids
     }
     if len(resource_ids) > 1 and any(ready.values()):
-        return "Report each resource's results in a separate alert."
-    if objective.get("kind") == "report_results" and not all(ready.values()):
-        return "Result reports require evidence for every resource."
+        return "Deliver each source-signaled resource in a separate alert."
+    if objective.get("kind") == "notify" and not all(ready.values()):
+        return "Notify objectives require alert-ready evidence for every resource."
     if (
         objective.get("kind") == "monitor"
         and not any(ready.values())
@@ -307,7 +307,7 @@ def record_alert(
     newly_completed = [
         resource_id
         for resource_id in resource_ids
-        if evidence.get(resource_id, {}).get("result_ready")
+        if evidence.get(resource_id, {}).get("alert_ready")
     ]
     updated["completed_resource_ids"] = list(dict.fromkeys([*completed, *newly_completed]))
     monitoring = updated.setdefault("monitoring", {})
@@ -330,14 +330,14 @@ def record_alert(
 
 
 def should_continue_after_alert(state: dict[str, Any]) -> bool:
-    """Continue when another objective resource already has inspected results."""
+    """Continue when another objective resource already has alert-ready evidence."""
     if pending_alert_resource_ids(state):
         return True
     objective = state.get("objective") or {}
     completed = set(state.get("completed_resource_ids", []))
     evidence = state.get("evidence", {})
     return any(
-        resource_id not in completed and evidence.get(resource_id, {}).get("result_ready")
+        resource_id not in completed and evidence.get(resource_id, {}).get("alert_ready")
         for resource_id in objective.get("resource_ids", [])
     )
 
@@ -384,10 +384,10 @@ def _apply_discovery(
     evidence = state.setdefault("evidence", {})
     for resource in actionable:
         evidence.setdefault(resource.resource_id, {}).update(
+            dict(resource.evidence),
             status=resource.status,
-            results_status=resource.results_status,
             active=resource.active,
-            result_ready=resource.result_ready,
+            alert_ready=resource.alert_ready,
             observed_at=observed_at,
         )
     original_count = len(effect.resources)
@@ -414,8 +414,8 @@ def _apply_observation(effect: SourceEffect, state: dict[str, Any], observed_at:
         evidence["required_action"] = effect.required_action
     if effect.clear_required_action:
         evidence.pop("required_action", None)
-    if effect.result_ready:
-        evidence["result_ready"] = True
+    if effect.alert_ready:
+        evidence["alert_ready"] = True
         pending = pending_alert_resource_ids(state)
         state["pending_alert_resource_ids"] = list(dict.fromkeys([*pending, effect.resource_id]))
         state.pop("pending_alert_resource_id", None)

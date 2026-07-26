@@ -401,11 +401,11 @@ async def test_completed_portfolio_uses_the_unbounded_idle_wait() -> None:
             **initial_state(),
             "phase": "active",
             "objective": {
-                "kind": "report_results",
+                "kind": "notify",
                 "resource_ids": [resource_id],
                 "summary": "Report the completed resource.",
             },
-            "evidence": {resource_id: {"result_ready": True, "status": "Done"}},
+            "evidence": {resource_id: {"alert_ready": True, "status": "Done"}},
             "pending_alert_resource_ids": [resource_id],
         },
         delivered_at=100,
@@ -517,7 +517,7 @@ async def test_result_delivery_is_idempotent_across_fresh_invocations() -> None:
             AgentTurn(
                 rationale="Scope result delivery.",
                 action=SelectObjective(
-                    kind="report_results",
+            kind="notify",
                     resource_ids=[experiment_id],
                     summary="Report available results.",
                 ),
@@ -568,7 +568,7 @@ async def test_result_alerts_cannot_group_experiments() -> None:
             AgentTurn(
                 rationale="Group related completed results.",
                 action=SelectObjective(
-                    kind="report_results",
+            kind="notify",
                     resource_ids=experiment_ids,
                     summary="Report both completed experiments.",
                 ),
@@ -673,7 +673,7 @@ async def test_ready_result_blocks_wait_until_reported() -> None:
 
     transcript = result.get("transcript", [])
     assert transcript[4]["result"]["status"] == "rejected"
-    assert "reported before waiting" in transcript[4]["result"]["reason"]
+    assert "delivered before waiting" in transcript[4]["result"]["reason"]
     assert clock.waits == []
     assert len(sink.notifications) == 1
 

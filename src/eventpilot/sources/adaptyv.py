@@ -128,12 +128,12 @@ class AdaptyvDataSource:
             ResourceSnapshot(
                 resource_id=item["id"],
                 status=item["status"],
-                results_status=item["results_status"],
                 active=item["status"] != ExperimentStatus.CANCELED,
-                result_ready=(
+                alert_ready=(
                     item["status"] == ExperimentStatus.DONE
                     and item["results_status"] in {"Partial", "All"}
                 ),
+                evidence={"results_status": item["results_status"]},
                 payload=item,
             )
             for item in result["items"]
@@ -152,7 +152,7 @@ class AdaptyvDataSource:
         evidence = {
             "status": result["status"],
             "results_status": result["results_status"],
-            "result_ready": (
+            "alert_ready": (
                 result["status"] == ExperimentStatus.DONE
                 and result["results_status"] in {"Partial", "All"}
             ),
@@ -310,7 +310,7 @@ class AdaptyvDataSource:
             resource_id=action.experiment_id,
             evidence={"result_count": result["count"], "results_observed": True},
             inspected=True,
-            result_ready=result["count"] > 0,
+            alert_ready=result["count"] > 0,
         )
         return SourceExecution(result=result, effects=(effect,))
 

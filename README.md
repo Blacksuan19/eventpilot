@@ -269,6 +269,10 @@ Each source supplies a few things to the runtime.
 - Normalized resource snapshots and effects for the graph reducers.
 - Approval metadata for consequential operations.
 
+Snapshots expose generic identity, status, activity, evidence, and `alert_ready` fields. A source
+decides what makes a resource alert-ready. Platform concepts such as experiment results, workflow
+failures, and incident severity remain in its evidence rather than the shared contract.
+
 For example, a GitHub Actions source could expose workflow tools backed by `gh` and reuse the same
 LangGraph runtime and dashboard.
 

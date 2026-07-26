@@ -118,7 +118,7 @@ class DemoAdaptyvReasoningEngine:
             ready_ids = [
                 experiment_id
                 for experiment_id in objective.get("resource_ids", [])
-                if evidence.get(experiment_id, {}).get("result_ready")
+                if evidence.get(experiment_id, {}).get("alert_ready")
                 and not evidence.get(experiment_id, {}).get("results_observed")
             ]
             if ready_ids:

@@ -49,6 +49,12 @@ transcript, and the clock. They return the platform JSON result plus immutable `
 records. The graph reducer owns scope, portfolio rotation, evidence persistence, deduplication,
 polling, alert readiness, and invocation transitions.
 
+`ResourceSnapshot` carries only source-neutral fields: resource identity, current status, whether it
+is active, arbitrary evidence, the original payload, and an optional `alert_ready` signal.
+`SourceEffect` uses the same signal when a later observation becomes operator-worthy. Result
+availability, workflow conclusions, incident severity, and similar platform concepts stay inside
+the source-owned evidence mapping.
+
 A GitHub Actions plugin, for example, could register `list_workflow_runs`, `get_workflow_run`,
 `list_run_jobs`, and `rerun_workflow` models. Its handlers could call `gh` through an injected CLI
 adapter. Its list operation would emit discovered `ResourceSnapshot` values and detail operations
