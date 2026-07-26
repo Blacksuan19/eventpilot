@@ -345,9 +345,16 @@ def should_continue_after_alert(state: dict[str, Any]) -> bool:
 def complete_objective(state: dict[str, Any]) -> dict[str, Any]:
     """Clear completed objective state before the next discovery pass."""
     updated = deepcopy(state)
+    known_resource_ids = set(updated.get("evidence", {}))
+    completed_resource_ids = set(updated.get("completed_resource_ids", []))
+    next_phase = (
+        "idle"
+        if known_resource_ids and known_resource_ids.issubset(completed_resource_ids)
+        else "discovery"
+    )
     updated.update(
         objective=None,
-        phase="discovery",
+        phase=next_phase,
         objective_waited=False,
         poll_interval_seconds=None,
         last_inspected_resource_id=None,

@@ -50,6 +50,11 @@ class DemoAdaptyvReasoningEngine:
             return self._required_action_turn(experiment_id, tool, source_state)
 
         if not transcript:
+            if source_state.get("phase") == "idle":
+                return AgentTurn(
+                    rationale="No source work is immediately available.",
+                    action=Wait(seconds=60, reason="Back off before discovering again."),
+                )
             if source_state.get("phase") == "active" and source_state.get("objective"):
                 objective = source_state["objective"]
                 completed = set(source_state.get("completed_resource_ids", []))

@@ -29,7 +29,7 @@ from eventpilot.core.approvals import ApprovalDecision
 from eventpilot.core.autonomous import AgentRuntime, build_autonomous_graph
 from eventpilot.core.autonomous.state import AutonomousAgentState
 from eventpilot.core.clock import AcceleratedClock
-from eventpilot.core.monitoring import SelectObjective, initial_state
+from eventpilot.core.monitoring import SelectObjective, initial_state, record_alert
 from eventpilot.core.notifications import DeliveryResult, Notification
 from eventpilot.core.reporting import (
     AgentDecisionEvent,
@@ -346,6 +346,56 @@ async def test_idle_agent_waits_without_sending_an_update() -> None:
     assert result.get("invocation_summary") == "Waited 60 seconds before the next invocation."
     assert sink.notifications == []
     assert clock.waits == [60]
+
+
+async def test_completed_portfolio_uses_the_unbounded_idle_wait() -> None:
+    """Enter idle after final delivery and use the dedicated idle sleep function."""
+    resource_id = "completed-resource"
+    source_state = record_alert(
+        [resource_id],
+        {
+            **initial_state(),
+            "phase": "active",
+            "objective": {
+                "kind": "report_results",
+                "resource_ids": [resource_id],
+                "summary": "Report the completed resource.",
+            },
+            "evidence": {resource_id: {"result_ready": True, "status": "Done"}},
+            "pending_alert_resource_ids": [resource_id],
+        },
+        delivered_at=100,
+    )
+    active_sleeps: list[float] = []
+    idle_sleeps: list[float] = []
+
+    async def active_sleep(seconds: float) -> None:
+        """Record an incorrectly selected active wait."""
+        active_sleeps.append(seconds)
+
+    async def idle_sleep(seconds: float) -> None:
+        """Record the expected unbounded idle wait."""
+        idle_sleeps.append(seconds)
+
+    graph = build_autonomous_graph(
+        ScriptedAgent(
+            [AgentTurn(rationale="No work remains.", action=Wait(seconds=300, reason="Idle."))]
+        ),
+        AdaptyvDataSource(MockFoundryClient.from_fixture()),
+        RecordingSink(),
+        sleep=active_sleep,
+        idle_sleep=idle_sleep,
+    )
+
+    result = await graph.ainvoke(
+        {"transcript": [], "source_state": source_state},
+        config={"configurable": {"thread_id": "completed-idle-test"}},
+    )
+
+    assert source_state["phase"] == "idle"
+    assert active_sleeps == []
+    assert idle_sleeps == pytest.approx([300], abs=0.01)
+    assert result.get("source_state", {}).get("phase") == "discovery"
 
 
 async def test_agent_selects_the_discovered_experiment_portfolio() -> None:
@@ -834,7 +884,13 @@ async def test_sqlite_checkpoint_survives_fresh_invocations(tmp_path: Path) -> N
 
     assert first.get("invocation_count") == 2
     assert second.get("invocation_count") == 4
-    assert len(second.get("transcript", [])) == 3
+    assert tool_names(second.get("transcript", [])) == [
+        "list_experiments",
+        "select_objective",
+        "get_experiment",
+        "list_experiment_results",
+        "send_alert",
+    ]
     second_source_state = second.get("source_state", {})
     assert second_source_state.get("completed_resource_ids") == experiment_ids
     assert set(second_source_state.get("monitoring", {})) == set(experiment_ids)
