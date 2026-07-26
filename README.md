@@ -3,7 +3,7 @@
 EventPilot is a generic autonomous operations agent for events and long-running work. It discovers
 what is happening, chooses typed tools, decides when to check again, takes source-defined actions,
 and sends useful updates through a configured notification channel. Its continuous runtime polls
-through source tools on its own schedule and starts fresh reasoning cycles as work evolves.
+through source tools on its own schedule and preserves state between graph invocations.
 
 A `DataSource` defines its domain by registering typed tools and translating their responses into
 generic resource observations. Here, a resource means the thing being followed. It could be an
@@ -20,7 +20,7 @@ lifecycle data stay hidden behind the adapter.
 
 - Discovers resources through the typed tools supplied by the configured data source.
 - Inspects independent resources concurrently and reduces the resulting evidence in a stable order.
-- Chooses whether to investigate, change source state, notify an operator, or finish a cycle.
+- Chooses whether to investigate, change source state, notify an operator, or wait.
 - Selects its own polling interval and enters a longer idle pause when no active work remains.
 - Suspends approval-sensitive tools for an operator decision before resuming the same graph thread.
 - Delivers updates through a replaceable notification sink and records successful delivery.
@@ -29,22 +29,26 @@ lifecycle data stay hidden behind the adapter.
 Instructor builds the response schema at runtime from the core actions and the data source's
 Pydantic tool models. Each model response is validated against that schema. LangGraph handles
 routing and SQLite checkpoints. It suspends approval-sensitive actions with `interrupt()` and
-resumes them with `Command`. Reducers own objectives, polling, evidence, delivery state, and cycle
+resumes them with `Command`. Reducers own objectives, polling, evidence, delivery state, and state
 transitions. Platform details live behind the `DataSource` protocol. Delivery uses a separate
 `NotificationSink` protocol, so any source can be paired with any sink.
 
-A finite cycle is one bounded reasoning session inside the continuous runtime. `finish_cycle` closes
-that session after its current work is complete. The runtime then starts another session on the same
-durable supervisor thread.
+Each LangGraph invocation has an explicit stop condition. A completed wait returns control after the
+selected delay. A final delivery returns control once its objective is complete. The runtime starts
+the next invocation on the same durable thread, retaining source state while clearing the short-term
+tool transcript. LangGraph's recursion limit remains an emergency guard for a graph that fails to
+reach either stop condition.
 
 ## Agent loop
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, ui-sans-serif, system-ui","lineColor":"#64748b","primaryTextColor":"#172033"},"flowchart":{"curve":"linear","nodeSpacing":42,"rankSpacing":52}}}%%
 flowchart TB
-    subgraph control["1 · Decide"]
+    runtime["Continuous runtime<br/>same durable thread"]
+
+    subgraph control["1 · Reason and route"]
         direction LR
-        runtime["Continuous runtime<br/>starts a finite cycle"] --> agent["LLM selects<br/>typed actions"]
+        start(["Graph invocation"]) --> agent["LLM selects<br/>typed actions"]
         agent --> router{"Action type"}
     end
 
@@ -53,7 +57,7 @@ flowchart TB
         source_action["Source tools<br/>fan out independent reads"]
         notify_action["send_alert<br/>validate evidence and scope"]
         wait_action["wait<br/>polling interval or idle pause"]
-        finish_action["finish_cycle"]
+        reject_action["Rejected action<br/>record evidence"]
     end
 
     subgraph integrations["3 · Use pluggable integrations"]
@@ -63,28 +67,32 @@ flowchart TB
         approval["LangGraph interrupt"] --> operator["Operator decision"]
     end
 
-    subgraph state["4 · Persist and continue"]
+    subgraph state["4 · Persist and route"]
         direction LR
         effects["Normalize effects"] --> checkpoint["Reduce state and<br/>checkpoint in SQLite"]
-        checkpoint --> next_turn["Next reasoning turn"]
+        checkpoint --> continuation{"Immediate work<br/>remains?"}
+        continuation -->|yes| next_turn["Next reasoning turn"]
+        continuation -->|wait completed<br/>or objective complete| finish(["End invocation"])
     end
 
+    runtime --> start
     router -->|source tools| source_action
     router -->|notification| notify_action
     router -->|pause| wait_action
-    router -->|cycle complete| finish_action
+    router -->|invalid selection| reject_action
 
     source_action --> source
     api --> effects
     notify_action --> sink
     channel --> effects
     wait_action --> effects
+    reject_action --> effects
 
     source_action -.->|approval-sensitive tool| approval
     operator -.->|Command resumes graph| source_action
 
     next_turn --> agent
-    finish_action --> runtime
+    finish --> runtime
 
     classDef controlNode fill:#ede9fe,stroke:#7c3aed,color:#3b1d72,stroke-width:1.5px;
     classDef decisionNode fill:#fff7d6,stroke:#d99516,color:#704b05,stroke-width:1.5px;
@@ -94,12 +102,12 @@ flowchart TB
     classDef lifecycleNode fill:#f1f5f9,stroke:#64748b,color:#334155,stroke-width:1.5px;
     classDef approvalNode fill:#fff0f2,stroke:#d9475f,color:#831b2d,stroke-width:1.5px;
 
-    class runtime,agent controlNode;
-    class router decisionNode;
+    class runtime,start,agent controlNode;
+    class router,continuation decisionNode;
     class source,api,sink,channel integrationNode;
     class effects,checkpoint stateNode;
-    class source_action,notify_action,wait_action actionNode;
-    class finish_action,next_turn lifecycleNode;
+    class source_action,notify_action,wait_action,reject_action actionNode;
+    class finish,next_turn lifecycleNode;
     class approval,operator approvalNode;
 
     style control fill:#faf8ff,stroke:#c4b5fd,stroke-width:1px
@@ -108,10 +116,10 @@ flowchart TB
     style state fill:#f4fbf7,stroke:#bbf7d0,stroke-width:1px
 ```
 
-Every completed tool path joins at one reducer before the next reasoning turn. Independent source
-reads run as LangGraph `Send` branches and join in selection order. Approval-sensitive tools suspend
-at `interrupt()` and resume from the same checkpoint with `Command`. `finish_cycle` closes the
-finite cycle, then the continuous runtime starts a fresh one.
+Every completed tool path updates checkpointed state. Independent source reads run as LangGraph
+`Send` branches and join in selection order. Approval-sensitive tools suspend at `interrupt()` and
+resume from the same checkpoint with `Command`. Successful waits and completed objectives reach
+`END`. The runtime then invokes the graph again with the same thread identifier.
 
 ## Notification sinks
 
@@ -237,6 +245,7 @@ These settings control that behavior.
 ```dotenv
 EVENTPILOT_TIME_ACCELERATION=3600
 EVENTPILOT_MAX_PHYSICAL_WAIT_SECONDS=5
+EVENTPILOT_RECURSION_LIMIT=256
 ```
 
 The acceleration factor and fixture durations remain hidden from the model.
